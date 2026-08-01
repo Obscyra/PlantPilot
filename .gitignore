@@ -1,0 +1,27 @@
+# Gradle project-specific cache directory
+.gradle
+
+# Gradle build output directory
+build
+
+# Kotlin plugin data
+.kotlin
+
+# Android Studio / IntelliJ
+.idea
+*.iml
+
+# Local configuration
+local.properties
+keystore.properties
+
+# APK output
+*.apk
+*.aab
+
+# Artifacts
+.artifacts
+
+# OS files
+.DS_Store
+Thumbs.db

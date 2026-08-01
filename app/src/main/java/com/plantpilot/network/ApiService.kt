@@ -1,0 +1,56 @@
+package com.plantpilot.network
+
+import com.plantpilot.model.WateringSchedule
+import kotlinx.serialization.Serializable
+import retrofit2.Response
+import retrofit2.http.*
+
+@Serializable
+data class DeviceStatusResponse(
+    val water_level: Int,
+    val soil: List<Int>,
+    val wifi_rssi: Int,
+    val wifi_ssid: String? = null,
+    val uptime_sec: Long? = null,
+    val free_heap: Int? = null,
+    val raw_soil: List<Int>? = null,
+    val epoch: Long? = null,
+    val pumps: List<Boolean>? = null
+)
+
+@Serializable
+data class MotorConfig(
+    val id: Int,
+    val name: String,
+    val mode: String, // "off", "auto", "scheduled"
+    val amount_ml: Int,
+    val threshold: Int? = null,
+    val version: Int = 1,
+    val schedules: List<WateringSchedule> = emptyList()
+)
+
+@Serializable
+data class SyncRequest(
+    val epoch: Long,
+    val motors: List<MotorConfig>
+)
+
+@Serializable
+data class SyncResponse(
+    val updated: List<Int>,
+    val ignored: List<Int>
+)
+
+@Serializable
+data class GenericResponse(
+    val status: String,
+    val motor: Int? = null
+)
+
+interface ApiService {
+    @POST("/api/sync")
+    suspend fun sync(@Body request: SyncRequest): Response<SyncResponse>
+
+    @POST("/api/motor/{id}/water_now")
+    suspend fun waterNow(@Path("id") motorId: Int): Response<GenericResponse>
+}
