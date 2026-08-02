@@ -23,6 +23,8 @@ import com.plantpilot.data.NetworkModule
 import com.plantpilot.data.PlantPilotRepository
 import com.plantpilot.data.SettingsManager
 import com.plantpilot.network.DeviceConfigResponse
+import com.plantpilot.network.DeviceMotorConfig
+import com.plantpilot.network.DeviceStatusResponse
 import com.plantpilot.network.MotorConfig
 import com.plantpilot.network.SyncRequest
 import com.plantpilot.util.NotificationHelper
@@ -49,6 +51,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     val isConnecting = hardwareRepository.isConnecting
     val telemetry = hardwareRepository.telemetry
 
+    // Per-sensor calibration pulled from the device (sensorId -> (dry, wet)).
+    private val _sensorCalibration = MutableStateFlow<Map<Int, Pair<Int, Int>>>(emptyMap())
+    val sensorCalibration: StateFlow<Map<Int, Pair<Int, Int>>> = _sensorCalibration.asStateFlow()
+
     private val POLL_INTERVAL_MS = 30_000L
 
     private val _history = MutableStateFlow<List<WateringEvent>>(emptyList())
@@ -61,9 +67,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         private set
 
     var isRefreshingDevice by mutableStateOf(value = false)
-        private set
-
-    var connectionError by mutableStateOf<String?>(null)
         private set
 
     var isSyncing by mutableStateOf(value = false)
@@ -84,34 +87,23 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     private var lastLowWaterNotifiedAt = 0L
     private val LOW_WATER_NOTIFY_INTERVAL_MS = 60 * 60 * 1000L
 
+    // Persistent telemetry snapshot is rewritten at most every 2s so a closed
+    // app reopens with last-known data without hammering DataStore.
+    private var lastSnapshotSavedAt = 0L
+    private val SNAPSHOT_SAVE_INTERVAL_MS = 2000L
+
     init {
+        // Hydrate the last known device state before the first live message
+        // arrives, so a reopened app shows up-to-date data instantly (persisted
+        // snapshot, not mocks) and then live sync corrects it.
+        viewModelScope.launch {
+            settingsManager.lastTelemetryFlow.first()?.let { applyTelemetry(it) }
+        }
+
         // Observe real-time telemetry from WebSocket
         viewModelScope.launch {
             hardwareRepository.telemetry.collect { telemetry ->
-                telemetry?.let { status ->
-                    val tankLevel = percentageToLevel(status.water_level)
-                    _deviceState.value = _deviceState.value.copy(
-                        waterTankLevel = tankLevel,
-                        wifiSsid = status.wifi_ssid ?: _deviceState.value.wifiSsid
-                    )
-
-                    // Hourly low-water reminder
-                    if (_settings.value.notificationsLowWater &&
-                        tankLevel <= _deviceState.value.lowWaterThreshold
-                    ) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastLowWaterNotifiedAt >= LOW_WATER_NOTIFY_INTERVAL_MS) {
-                            lastLowWaterNotifiedAt = now
-                            notificationHelper.showLowWaterAlert()
-                        }
-                    }
-
-                    // Update plants with real moisture data from push
-                    _plants.value = _plants.value.map { plant ->
-                        val moisture = status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
-                        plant.copy(currentMoisture = moisture)
-                    }
-                }
+                telemetry?.let { applyTelemetry(it) }
             }
         }
 
@@ -165,12 +157,12 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
         // Load persisted plants (schedules/config survive full app restarts).
         // Falls back to MockData on a truly fresh install (never-saved).
+        // Hydrated once: DataStore's plants value only ever changes from this
+        // process, and a continuous collect would re-emit the last *persisted*
+        // (stale-moisture) plants on every unrelated DataStore write — e.g. the
+        // 2s telemetry snapshot — clobbering live moisture in memory.
         viewModelScope.launch {
-            settingsManager.plantsFlow.collect { saved ->
-                if (saved != null) {
-                    _plants.value = saved
-                }
-            }
+            settingsManager.plantsFlow.first()?.let { _plants.value = it }
         }
 
         // Observe hardware events (History tracking)
@@ -211,9 +203,9 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 if (!hardwareRepository.isConnected.value) {
                     val ip = _deviceState.value.deviceIp
                     if (ip.isNotBlank()) {
-                        val ok = liveCheck()
-                        connectionError = if (ok) null else "Device unreachable"
-                        if (ok) connectToDevice()
+                        // Silently re-check the ESP32 so the UI recovers as soon as
+                        // the device is reachable; the status chip communicates state.
+                        if (liveCheck()) connectToDevice()
                     }
                 }
             }
@@ -245,7 +237,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             isRefreshingDevice = true
             val ok = liveCheck()
-            connectionError = if (ok) null else "Device unreachable"
             if (ok) {
                 if (!hardwareRepository.isConnected.value) connectToDevice()
                 performTwoWaySync()
@@ -262,7 +253,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             isRefreshingDevice = true
             val ok = liveCheck()
-            connectionError = if (ok) null else "Device unreachable"
             if (ok && !hardwareRepository.isConnected.value) {
                 connectToDevice()
             }
@@ -275,10 +265,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     fun onAppResumed() {
         viewModelScope.launch {
             val ok = liveCheck()
-            connectionError = if (ok) null else "Device unreachable"
             if (ok) {
                 if (hardwareRepository.isConnected.value) {
                     performTwoWaySync()
+                    requestSensorReading()
                 } else {
                     connectToDevice()
                 }
@@ -304,35 +294,97 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             val result: Result<DeviceConfigResponse> = repository.fetchDeviceConfig()
             if (result.isSuccess) {
                 val deviceMotors = result.getOrThrow().motors
+                // Keep the calibration UI in sync with what the device stores.
+                val calibration = deviceMotors.mapNotNull { dev ->
+                    val dry = dev.calibration_dry
+                    val wet = dev.calibration_wet
+                    if (dry != null && wet != null) dev.id to (dry to wet) else null
+                }.toMap()
+                if (calibration.isNotEmpty()) _sensorCalibration.value = calibration
                 var changed = false
-                val updatedPlants = _plants.value.map { plant ->
-                    val dev = deviceMotors.find { it.id == plant.motorNumber }
-                    // NOTE: device last_modified is epoch seconds, plant.lastUpdated is epoch millis.
-                    if (dev != null && dev.last_modified * 1000L > plant.lastUpdated) {
-                        changed = true
-                        plant.copy(
-                            wateringMode = devModeToMode(dev.mode),
-                            waterAmountMl = dev.amount_ml,
-                            moistureThreshold = dev.threshold ?: plant.moistureThreshold,
-                            schedules = dev.schedules.map {
-                                WateringSchedule(
-                                    id = UUID.randomUUID().toString(),
-                                    hour = it.hour,
-                                    minute = it.minute,
-                                    daysOfWeek = DayOfWeek.entries.toSet()
-                                )
-                            },
-                            configVersion = dev.version,
-                            lastUpdated = dev.last_modified * 1000
-                        )
-                    } else plant
+                deviceMotors.forEach { dev ->
+                    if (applyDeviceConfig(dev)) changed = true
                 }
-                if (changed) {
-                    _plants.value = updatedPlants
-                    persistPlants()
-                }
+                if (changed) persistPlants()
             }
             syncConfigWithDevice(silent = true, force = true)
+        }
+    }
+
+    /**
+     * Applies a device motor config to the matching plant, but only when the
+     * device is newer (last_modified epoch seconds vs plant.lastUpdated epoch
+     * millis). This keeps both sides in sync without ever clobbering edits the
+     * user just made in the app (those bump lastUpdated and win the next push).
+     */
+    private fun applyDeviceConfig(dev: DeviceMotorConfig): Boolean {
+        val plant = _plants.value.find { it.motorNumber == dev.id } ?: return false
+        if (dev.last_modified * 1000L <= plant.lastUpdated) return false
+        _plants.value = _plants.value.map {
+            if (it.id == plant.id) {
+                it.copy(
+                    wateringMode = devModeToMode(dev.mode),
+                    waterAmountMl = dev.amount_ml,
+                    moistureThreshold = dev.threshold ?: it.moistureThreshold,
+                    minIntervalHours = dev.min_interval_hours ?: it.minIntervalHours,
+                    schedules = dev.schedules.map {
+                        WateringSchedule(
+                            id = UUID.randomUUID().toString(),
+                            hour = it.hour,
+                            minute = it.minute,
+                            daysOfWeek = DayOfWeek.entries.toSet()
+                        )
+                    },
+                    configVersion = dev.version,
+                    lastUpdated = dev.last_modified * 1000
+                )
+            } else it
+        }
+        return true
+    }
+
+    /**
+     * Single entry point for every telemetry frame (live WebSocket push and the
+     * persisted snapshot hydrated at startup). Updates tank/SSID state, plant
+     * moisture, syncs per-plant config from the device when newer, and persists
+     * a debounced snapshot so a fully closed app reopens with last-known data.
+     */
+    private fun applyTelemetry(status: DeviceStatusResponse) {
+        val tankLevel = percentageToLevel(status.water_level)
+        _deviceState.value = _deviceState.value.copy(
+            waterTankLevel = tankLevel,
+            wifiSsid = status.wifi_ssid ?: _deviceState.value.wifiSsid
+        )
+
+        // Hourly low-water reminder
+        if (_settings.value.notificationsLowWater &&
+            tankLevel <= _deviceState.value.lowWaterThreshold
+        ) {
+            val now = System.currentTimeMillis()
+            if (now - lastLowWaterNotifiedAt >= LOW_WATER_NOTIFY_INTERVAL_MS) {
+                lastLowWaterNotifiedAt = now
+                notificationHelper.showLowWaterAlert()
+            }
+        }
+
+        // Update plants with real moisture data from push
+        _plants.value = _plants.value.map { plant ->
+            val moisture = status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
+            plant.copy(currentMoisture = moisture)
+        }
+
+        // Keep per-plant config in sync from the live stream (device-newer only).
+        var configChanged = false
+        status.motors?.forEach { dev ->
+            if (applyDeviceConfig(dev)) configChanged = true
+        }
+        if (configChanged) persistPlants()
+
+        // Debounced persistent snapshot (≤1 write / 2s).
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastSnapshotSavedAt >= SNAPSHOT_SAVE_INTERVAL_MS) {
+            lastSnapshotSavedAt = nowMs
+            viewModelScope.launch { settingsManager.saveTelemetrySnapshot(status) }
         }
     }
 
@@ -340,6 +392,37 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         "auto" -> WateringMode.AUTOMATIC
         "scheduled" -> WateringMode.SCHEDULED
         else -> WateringMode.OFF
+    }
+
+    /** Pushes a dry/wet calibration for one sensor to the ESP32. */
+    fun calibrateSensor(sensorId: Int, dry: Int, wet: Int, onResult: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch {
+            if (!hardwareRepository.isConnected.value) {
+                onResult?.invoke(false)
+                return@launch
+            }
+            val result = repository.calibrate(sensorId, dry, wet)
+            if (result.isSuccess) {
+                _sensorCalibration.value = _sensorCalibration.value + (sensorId to (dry to wet))
+            }
+            onResult?.invoke(result.isSuccess)
+        }
+    }
+
+    /**
+     * Enables/disables the realtime 1s raw-sensor stream used by the
+     * calibration sheet. Send CAL_STREAM_ON while the sheet is open so the
+     * user sees live raw ADC values; send CAL_STREAM_OFF when it closes.
+     */
+    fun setCalibrationStreaming(enabled: Boolean) {
+        if (!hardwareRepository.isConnected.value) return
+        hardwareRepository.sendCommand(if (enabled) "CAL_STREAM_ON" else "CAL_STREAM_OFF")
+    }
+
+    /** Asks the ESP32 to read and push the sensors immediately (app open/resume). */
+    fun requestSensorReading() {
+        if (!hardwareRepository.isConnected.value) return
+        hardwareRepository.sendCommand("READ_SENSORS")
     }
 
     suspend fun waterPlant(plantId: String): Boolean {
@@ -368,12 +451,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 }
             } else {
                 pendingWatering.remove(plant.motorNumber)
-                connectionError = "Failed to reach device"
                 false
             }
         } catch (e: Exception) {
             pendingWatering.remove(plant.motorNumber)
-            connectionError = "Failed to reach device"
             false
         }
     }
@@ -422,6 +503,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     },
                     amount_ml = plant.waterAmountMl,
                     threshold = plant.moistureThreshold,
+                    min_interval_hours = plant.minIntervalHours,
                     version = plant.configVersion,
                     last_modified = plant.lastUpdated / 1000,
                     schedules = plant.schedules
@@ -434,14 +516,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             )
 
             val result = repository.sync(request)
-            
+
             if (result.isSuccess) {
                 isConfigDirty = false
-                connectionError = null
-            } else {
-                connectionError = "Sync Failed: ${result.exceptionOrNull()?.message}"
             }
-            
+
             if (!silent) {
                 val elapsed = System.currentTimeMillis() - startTime
                 val remaining = (2000L - elapsed).coerceAtLeast(0)

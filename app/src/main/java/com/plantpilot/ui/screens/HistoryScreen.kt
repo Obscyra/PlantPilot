@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.plantpilot.model.*
+import com.plantpilot.ui.components.ConnectionStatusChip
 import com.plantpilot.ui.components.EmptyState
 import com.plantpilot.ui.theme.NeonGreen
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -27,7 +28,8 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(
-    viewModel: PlantPilotViewModel
+    viewModel: PlantPilotViewModel,
+    onStatusChipClick: () -> Unit
 ) {
     val history by viewModel.history.collectAsState()
     val settings by viewModel.settings.collectAsState()
@@ -57,6 +59,13 @@ fun HistoryScreen(
                         text = "History",
                         fontWeight = FontWeight.Bold
                     )
+                },
+                actions = {
+                    ConnectionStatusChip(
+                        viewModel = viewModel,
+                        onClick = onStatusChipClick
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 }
             )
         }
