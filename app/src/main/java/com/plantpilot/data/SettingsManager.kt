@@ -8,6 +8,7 @@ import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
 import com.plantpilot.model.Plant
 import com.plantpilot.model.WateringEvent
+import com.plantpilot.network.DeviceStatusResponse
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
@@ -33,6 +34,7 @@ class SettingsManager(private val context: Context) {
         val WATERING_HISTORY: Preferences.Key<String> = stringPreferencesKey("watering_history")
         val ONBOARDING_COMPLETED: Preferences.Key<Boolean> = booleanPreferencesKey("onboarding_completed")
         val PLANTS: Preferences.Key<String> = stringPreferencesKey("plants_config")
+        val TELEMETRY_SNAPSHOT: Preferences.Key<String> = stringPreferencesKey("telemetry_snapshot")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -82,6 +84,20 @@ class SettingsManager(private val context: Context) {
         }
     }
 
+    /**
+     * Last known telemetry snapshot (moisture, tank level, RSSI, full motor
+     * config). Saved by the app while it runs so a fully closed app reopens
+     * with up-to-date data before the first live message arrives.
+     */
+    val lastTelemetryFlow: Flow<DeviceStatusResponse?> = context.dataStore.data.map { prefs ->
+        val raw = prefs[TELEMETRY_SNAPSHOT] ?: return@map null
+        try {
+            json.decodeFromString<DeviceStatusResponse>(raw)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun saveDeviceState(state: DeviceState) {
         context.dataStore.edit { prefs ->
             prefs[DEVICE_NAME] = state.deviceName
@@ -103,6 +119,12 @@ class SettingsManager(private val context: Context) {
     suspend fun saveOnboardingCompleted(completed: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[ONBOARDING_COMPLETED] = completed
+        }
+    }
+
+    suspend fun saveTelemetrySnapshot(status: DeviceStatusResponse) {
+        context.dataStore.edit { prefs ->
+            prefs[TELEMETRY_SNAPSHOT] = json.encodeToString(status)
         }
     }
 

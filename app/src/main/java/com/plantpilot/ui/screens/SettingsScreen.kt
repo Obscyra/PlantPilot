@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
@@ -23,6 +24,7 @@ import com.plantpilot.R
 import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
 import com.plantpilot.ui.components.CalibrationBottomSheet
+import com.plantpilot.ui.components.ConnectionStatusChip
 import com.plantpilot.viewmodel.PlantPilotViewModel
 import kotlinx.coroutines.launch
 
@@ -30,6 +32,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(
     viewModel: PlantPilotViewModel,
+    onStatusChipClick: () -> Unit,
     onShowOnboarding: () -> Unit,
     onNavigateToPumpTest: () -> Unit,
 ) {
@@ -38,9 +41,29 @@ fun SettingsScreen(
     val isConnected by viewModel.isConnected.collectAsState()
     val telemetry by viewModel.telemetry.collectAsState()
 
-    var deviceName by remember(deviceState.deviceName) { mutableStateOf(value = deviceState.deviceName) }
-    var deviceIp by remember(deviceState.deviceIp) { mutableStateOf(value = deviceState.deviceIp) }
-    var tankCapacity by remember(deviceState.tankCapacityMl) { mutableStateOf(value = deviceState.tankCapacityMl.toString()) }
+    // Field drafts are kept local while editing and only pushed to the ViewModel
+    // when the field loses focus. Committing on every keystroke made the fields
+    // self-reset: updateDeviceState -> DataStore save -> async flow re-emit ->
+    // deviceState.deviceIp changes -> remember(key) re-initialised the field with
+    // a stale value while the user was still typing ("prefill while editing").
+    var deviceName by remember { mutableStateOf(value = deviceState.deviceName) }
+    var deviceIp by remember { mutableStateOf(value = deviceState.deviceIp) }
+    var tankCapacity by remember { mutableStateOf(value = deviceState.tankCapacityMl.toString()) }
+    var deviceNameFocused by remember { mutableStateOf(value = false) }
+    var deviceIpFocused by remember { mutableStateOf(value = false) }
+    var tankCapacityFocused by remember { mutableStateOf(value = false) }
+
+    // Mirror persisted/external values back into the fields, but never while the
+    // user is editing that field (would clobber their in-progress typing).
+    LaunchedEffect(deviceState.deviceName) {
+        if (!deviceNameFocused) deviceName = deviceState.deviceName
+    }
+    LaunchedEffect(deviceState.deviceIp) {
+        if (!deviceIpFocused) deviceIp = deviceState.deviceIp
+    }
+    LaunchedEffect(deviceState.tankCapacityMl) {
+        if (!tankCapacityFocused) tankCapacity = deviceState.tankCapacityMl.toString()
+    }
     var showConnectDialog by remember { mutableStateOf(value = false) }
     var connectStep by remember { mutableIntStateOf(value = 0) }
     var showDeveloperInfo by remember { mutableStateOf(value = false) }
@@ -48,15 +71,6 @@ fun SettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
-
-    LaunchedEffect(viewModel.connectionError) {
-        viewModel.connectionError?.let { error ->
-            snackbarHostState.showSnackbar(
-                message = "Connection Error: $error",
-                duration = SnackbarDuration.Long
-            )
-        }
-    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -67,6 +81,13 @@ fun SettingsScreen(
                         text = "Settings",
                         fontWeight = FontWeight.Bold,
                     )
+                },
+                actions = {
+                    ConnectionStatusChip(
+                        viewModel = viewModel,
+                        onClick = onStatusChipClick
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 },
             )
         },
@@ -99,24 +120,32 @@ fun SettingsScreen(
                 ) {
                     OutlinedTextField(
                         value = deviceName,
-                        onValueChange = {
-                            deviceName = it
-                            viewModel.updateDeviceState { s -> s.copy(deviceName = it) }
-                        },
+                        onValueChange = { deviceName = it },
                         label = { Text("Device Name") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { state ->
+                                if (!state.isFocused && deviceName != deviceState.deviceName) {
+                                    viewModel.updateDeviceState { s -> s.copy(deviceName = deviceName) }
+                                }
+                                deviceNameFocused = state.isFocused
+                            },
                         singleLine = true,
                     )
 
                     OutlinedTextField(
                         value = deviceIp,
-                        onValueChange = {
-                            deviceIp = it
-                            viewModel.updateDeviceState { s -> s.copy(deviceIp = it) }
-                        },
+                        onValueChange = { deviceIp = it },
                         label = { Text("IP Address / Hostname") },
                         placeholder = { Text("e.g. 192.168.1.50") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { state ->
+                                if (!state.isFocused && deviceIp != deviceState.deviceIp) {
+                                    viewModel.updateDeviceState { s -> s.copy(deviceIp = deviceIp) }
+                                }
+                                deviceIpFocused = state.isFocused
+                            },
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Dns, contentDescription = null) }
                     )
@@ -155,6 +184,11 @@ fun SettingsScreen(
                     ) {
                         Button(
                             onClick = {
+                                // Commit an in-progress IP edit before the probe
+                                // so the check runs against what is in the field.
+                                if (deviceIp != deviceState.deviceIp) {
+                                    viewModel.updateDeviceState { s -> s.copy(deviceIp = deviceIp) }
+                                }
                                 // Perform an actual live handshake to the ESP32 and
                                 // only then report success/failure — never cached state.
                                 viewModel.checkConnection { success ->
@@ -210,14 +244,20 @@ fun SettingsScreen(
                 ) {
                     OutlinedTextField(
                         value = tankCapacity,
-                        onValueChange = {
-                            tankCapacity = it
-                            it.toIntOrNull()?.let { capacity ->
-                                viewModel.updateDeviceState { s -> s.copy(tankCapacityMl = capacity) }
-                            }
-                        },
+                        onValueChange = { tankCapacity = it },
                         label = { Text("Tank Capacity (ml)") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { state ->
+                                if (!state.isFocused) {
+                                    tankCapacity.toIntOrNull()?.let { capacity ->
+                                        if (capacity != deviceState.tankCapacityMl) {
+                                            viewModel.updateDeviceState { s -> s.copy(tankCapacityMl = capacity) }
+                                        }
+                                    }
+                                }
+                                tankCapacityFocused = state.isFocused
+                            },
                         singleLine = true
                     )
 
@@ -433,12 +473,32 @@ fun SettingsScreen(
             }
 
             if (showCalibrationSheet) {
+                // Live raw ADC readings (telemetry raw_soil indexed by sensor 1..4).
+                val liveReadings = telemetry?.raw_soil?.let { raw ->
+                    raw.mapIndexedNotNull { index, value -> (index + 1) to value }.toMap()
+                } ?: emptyMap()
+
                 CalibrationBottomSheet(
                     onDismiss = { showCalibrationSheet = false },
                     onSave = { sensorId, dry, wet ->
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Sensor $sensorId calibrated (Dry: $dry, Wet: $wet)")
+                        viewModel.calibrateSensor(sensorId, dry, wet) { success ->
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    message = if (success) {
+                                        "Sensor $sensorId calibrated (Dry: $dry, Wet: $wet)"
+                                    } else {
+                                        "Calibration failed — device unreachable"
+                                    },
+                                    duration = SnackbarDuration.Long
+                                )
+                            }
                         }
+                    },
+                    liveReadings = liveReadings,
+                    existingCalibration = viewModel.sensorCalibration.collectAsState().value,
+                    isConnected = isConnected,
+                    onStreamingChange = { enabled ->
+                        viewModel.setCalibrationStreaming(enabled)
                     }
                 )
             }

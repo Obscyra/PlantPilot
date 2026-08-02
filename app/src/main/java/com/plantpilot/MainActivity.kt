@@ -1,5 +1,9 @@
 package com.plantpilot
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -12,6 +16,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -20,8 +26,10 @@ import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.*
 import androidx.navigation.navArgument
+import com.plantpilot.data.HardwareRepository
 import com.plantpilot.navigation.Screen
 import com.plantpilot.navigation.bottomNavItems
+import com.plantpilot.ui.components.DeviceConnectionDialog
 import com.plantpilot.ui.screens.*
 import com.plantpilot.ui.theme.PlantPilotTheme
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -38,19 +46,53 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = false
         }
 
-        // Re-check the ESP32 connection every time the app returns to the
-        // foreground (recents switcher, back to app, etc.), not just on cold start.
+        // The background sync service posts a notification on Android 13+;
+        // request that permission once so the notification is actually visible.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION
+            )
+        }
+
+        // Drive telemetry cadence and the background sync service from the app's
+        // lifecycle so the ESP32 streams at 1s in the foreground and 3s while
+        // the app is backgrounded but not closed. The foreground service is
+        // started here (app is foreground, always permitted) and only stopped
+        // when the app is fully closed (onTaskRemoved), keeping the process —
+        // and thus the WebSocket — alive in the background.
         lifecycle.addObserver(LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.onAppResumed()
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    startForegroundService(Intent(this, SyncService::class.java))
+                    HardwareRepository.setStreamCadence(FOREGROUND_CADENCE_SEC)
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    // Re-check the ESP32 connection every time the app returns to
+                    // the foreground (recents switcher, back to app, etc.).
+                    viewModel.onAppResumed()
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    HardwareRepository.setStreamCadence(BACKGROUND_CADENCE_SEC)
+                }
+                else -> {}
             }
         })
-
         setContent {
             PlantPilotTheme {
                 PlantPilotApp(viewModel)
             }
         }
+    }
+
+    companion object {
+        private const val FOREGROUND_CADENCE_SEC = 1
+        private const val BACKGROUND_CADENCE_SEC = 3
+        private const val REQUEST_NOTIFICATION_PERMISSION = 1
     }
 }
 
@@ -66,6 +108,19 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
         val currentRoute = navBackStackEntry?.destination?.route
 
         val showBottomBar = currentRoute in bottomNavItems.map { it.route }
+
+        // Shared connection status + dialog so every tab shows the same
+        // unified chip (Disconnected / Connecting / Connected / Updating).
+        val deviceState by viewModel.deviceState.collectAsState()
+        var showConnectionDialog by remember { mutableStateOf(false) }
+        val onStatusChipClick: () -> Unit = {
+            // Tapping the chip: push any pending local config first when
+            // connected, then surface the shared connect/disconnect dialog.
+            if (viewModel.isConfigDirty && viewModel.isConnected.value) {
+                viewModel.syncConfigWithDevice()
+            }
+            showConnectionDialog = true
+        }
 
         Scaffold(
             bottomBar = {
@@ -189,6 +244,7 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 composable(Screen.Home.route) {
                     HomeScreen(
                         viewModel = viewModel,
+                        onStatusChipClick = onStatusChipClick,
                         onPlantClick = { plantId ->
                             navController.navigate(Screen.PlantDetail.createRoute(plantId))
                         }
@@ -198,6 +254,7 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 composable(Screen.Plants.route) {
                     PlantsListScreen(
                         viewModel = viewModel,
+                        onStatusChipClick = onStatusChipClick,
                         onPlantClick = { plantId ->
                             navController.navigate(Screen.PlantDetail.createRoute(plantId))
                         }
@@ -219,12 +276,16 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 }
 
                 composable(Screen.History.route) {
-                    HistoryScreen(viewModel = viewModel)
+                    HistoryScreen(
+                        viewModel = viewModel,
+                        onStatusChipClick = onStatusChipClick
+                    )
                 }
 
                 composable(Screen.Settings.route) {
                     SettingsScreen(
                         viewModel = viewModel,
+                        onStatusChipClick = onStatusChipClick,
                         onShowOnboarding = {
                             viewModel.showOnboardingAgain()
                         },
@@ -242,6 +303,18 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                     )
                 }
             }
+        }
+
+        // Shared connection dialog, reachable from the status chip on any tab.
+        if (showConnectionDialog) {
+            DeviceConnectionDialog(
+                isConnected = viewModel.isConnected.collectAsState().value,
+                isConnecting = viewModel.isConnecting.collectAsState().value,
+                deviceIp = deviceState.deviceIp,
+                onConnect = { viewModel.connectToDevice() },
+                onDisconnect = { viewModel.disconnectFromDevice() },
+                onDismiss = { showConnectionDialog = false }
+            )
         }
     }
 }

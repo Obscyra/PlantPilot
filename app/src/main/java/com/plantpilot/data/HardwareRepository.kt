@@ -31,13 +31,18 @@ sealed class HardwareEvent {
 }
 
 object HardwareRepository {
-    private const val INITIAL_RETRY_DELAY_MS = 2000L
-    private const val MAX_RETRY_DELAY_MS = 30000L
+    private const val RETRY_DELAY_MS = 2000L
     private const val HEARTBEAT_INTERVAL_MS = 5000L
+    // Number of consecutive unanswered heartbeat probes before we assume the
+    // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
+    private const val MAX_MISSED_PROBES = 3
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
+        // App-side WebSocket keepalive: sends a control ping and expects a pong,
+        // so NAT/firewall timeouts can't silently drop an idle-but-alive socket.
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -47,9 +52,14 @@ object HardwareRepository {
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
-    private var retryDelayMs = INITIAL_RETRY_DELAY_MS
     private var lastMessageTime = 0L
     private var lastHeartbeatSentTime = 0L
+    private var missedProbes = 0
+
+    // Telemetry cadence the ESP32 should stream at while we're connected.
+    // Applied immediately when the socket is up, otherwise queued and sent on
+    // the next open.
+    private var requestedCadenceSec = -1
 
     private val _logs = MutableSharedFlow<String>(replay = 50, extraBufferCapacity = 50)
     val logs: SharedFlow<String> = _logs
@@ -91,6 +101,9 @@ object HardwareRepository {
 
     private fun openSocket() {
         val url = currentUrl ?: return
+        // Only advertise "connecting" during the actual socket attempt, so the
+        // UI shows "Disconnected" during the (short) retry wait in between.
+        _isConnecting.value = true
         val request = Request.Builder().url(url).build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             // Ignore callbacks from stale sockets (e.g. after reconnect), so the
@@ -103,8 +116,12 @@ object HardwareRepository {
                 _isConnected.value = true
                 lastMessageTime = System.currentTimeMillis()
                 lastHeartbeatSentTime = 0L
-                retryDelayMs = INITIAL_RETRY_DELAY_MS
+                missedProbes = 0
                 addLog("System: Connected to ESP32")
+                // Apply the app's desired telemetry cadence once the socket is up.
+                if (requestedCadenceSec > 0) {
+                    sendCommand("SYNC_MODE $requestedCadenceSec")
+                }
                 sendCommand("STATUS")
                 startHeartbeat()
             }
@@ -114,6 +131,7 @@ object HardwareRepository {
                 // If we receive a message, we must be connected
                 lastMessageTime = System.currentTimeMillis()
                 lastHeartbeatSentTime = 0L
+                missedProbes = 0
                 if (!_isConnected.value) _isConnected.value = true
 
                 addLog("ESP32: $text")
@@ -153,12 +171,12 @@ object HardwareRepository {
 
     private fun scheduleReconnect() {
         cancelReconnect()
-        val delayMs = retryDelayMs
-        retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
-        _isConnecting.value = true
-        addLog("System: Retrying connection in ${delayMs / 1000}s...")
+        // While waiting to retry, stop advertising "connecting" so the UI shows a
+        // clear "Disconnected" state instead of an endless spinner.
+        _isConnecting.value = false
+        addLog("System: Retrying connection in ${RETRY_DELAY_MS / 1000}s...")
         reconnectJob = scope.launch {
-            delay(delayMs)
+            delay(RETRY_DELAY_MS)
             openSocket()
         }
     }
@@ -177,10 +195,13 @@ object HardwareRepository {
                 val now = System.currentTimeMillis()
                 val idle = now - lastMessageTime
                 if (idle >= HEARTBEAT_INTERVAL_MS) {
-                    if (lastHeartbeatSentTime != 0L && lastMessageTime < lastHeartbeatSentTime) {
-                        // We knocked before and got no reply — assume the ESP32 is gone
+                    val probeOutstanding = lastHeartbeatSentTime != 0L && lastMessageTime < lastHeartbeatSentTime
+                    if (probeOutstanding && missedProbes >= MAX_MISSED_PROBES) {
+                        // The ESP32 hasn't replied for several probes — assume gone.
+                        missedProbes = 0
                         webSocket?.close(1000, "ESP32 not responding")
                     } else {
+                        if (probeOutstanding) missedProbes++
                         sendCommand("STATUS")
                         lastHeartbeatSentTime = now
                     }
@@ -214,6 +235,18 @@ object HardwareRepository {
         } catch (e: Exception) {
             // Socket may already be closed/aborted (e.g. during heartbeat probe)
             addLog("Error: ${e.message}")
+        }
+    }
+
+    /**
+     * Tells the ESP32 how fast to stream telemetry (seconds between pushes).
+     * Foreground = 1s, background = 3s. Queued if the socket isn't open yet.
+     */
+    fun setStreamCadence(seconds: Int) {
+        requestedCadenceSec = seconds
+        val cmd = "SYNC_MODE $seconds"
+        if (webSocket != null && _isConnected.value) {
+            sendCommand(cmd)
         }
     }
 

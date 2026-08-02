@@ -9,9 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.animation.core.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -22,6 +20,7 @@ import java.util.Locale
 import com.plantpilot.model.Plant
 import com.plantpilot.model.WateringMode
 import com.plantpilot.model.WateringSchedule
+import com.plantpilot.ui.components.ConnectionStatusChip
 import com.plantpilot.ui.components.MoistureRing
 import com.plantpilot.ui.components.ScheduleBottomSheet
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -32,6 +31,7 @@ import com.plantpilot.util.TimeUtils
 @Composable
 fun PlantsListScreen(
     viewModel: PlantPilotViewModel,
+    onStatusChipClick: () -> Unit,
     onPlantClick: (String) -> Unit
 ) {
     val plants by viewModel.plants.collectAsState()
@@ -44,17 +44,6 @@ fun PlantsListScreen(
     var targetPlantId by remember { mutableStateOf("") }
     var editingSchedule by remember { mutableStateOf<WateringSchedule?>(null) }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "syncRotation")
-    val rotationAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -65,42 +54,12 @@ fun PlantsListScreen(
                     )
                 },
                 actions = {
-                    val isSyncing = viewModel.isSyncing
-                    val isDirty = viewModel.isConfigDirty
-                    
-                    if (isDirty || isSyncing) {
-                        Button(
-                            onClick = {},
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            modifier = Modifier
-                                .height(36.dp)
-                                .bounceClick(enabled = !isSyncing) {
-                                    viewModel.syncConfigWithDevice()
-                                },
-                            shape = MaterialTheme.shapes.medium,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        ) {
-                            Icon(
-                                imageVector = if (isSyncing) Icons.Default.Sync else Icons.Default.CloudUpload,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(18.dp)
-                                    .graphicsLayer {
-                                        if (isSyncing) {
-                                            rotationZ = rotationAngle
-                                        }
-                                    }
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isSyncing) "Updating" else "Update",
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                        }
-                    }
+                    // Unified live status chip: shows Updating/Connected/Connecting/
+                    // Disconnected and (syncing) replaces the old "Update" button.
+                    ConnectionStatusChip(
+                        viewModel = viewModel,
+                        onClick = onStatusChipClick
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
             )

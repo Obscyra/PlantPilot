@@ -57,8 +57,11 @@ struct MotorSettings {
     bool autoMode;
     int amountMl;
     int moistureThreshold;
+    int calibrationDry;   // raw ADC value in open air (driest point)
+    int calibrationWet;   // raw ADC value submerged in water (wettest point)
     int version;
     unsigned long lastModified; // epoch seconds of last config change (two-way sync)
+    int minIntervalHours; // min hours between auto waterings (0 = no limit)
     WateringSchedule schedules[5];
     int scheduleCount;
 };
@@ -86,7 +89,23 @@ Relay pumps[4] = {
 
 MotorSettings motorConfigs[4];
 int soilMoisture[4] = {50, 50, 50, 50};
+int rawSoilCache[4] = {0, 0, 0, 0};
 int waterLevel = 100;
+// Epoch of the last completed timed watering per pump; used to enforce the
+// per-plant min auto-water interval. Reset to 0 on boot (no gating until the
+// first completion).
+unsigned long lastAutoWaterEpoch[4] = {0, 0, 0, 0};
+
+// Sensor read cadence. Raw ADC readings are only refreshed every 10 minutes
+// for the dashboard; opening the calibration sheet forces a 1s realtime stream.
+const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
+bool calibrationStreamActive = false;
+unsigned long lastSensorSent = 0;
+
+// Telemetry cadence requested by the app via SYNC_MODE. Foreground -> 1s,
+// background -> 3s, no clients -> 60s. Reset to 3s on boot; the app re-sends
+// its mode whenever it (re)connects.
+unsigned long streamCadenceMs = 3000UL;
 
 Preferences preferences;
 AsyncWebServer server(80);
@@ -125,13 +144,24 @@ void broadcastTelemetry() {
     doc["type"] = "telemetry";
     doc["water_level"] = waterLevel;
 
+    // Refresh raw ADC readings on a 10-minute cadence when idle, but on every
+    // broadcast while the app is connected (foreground 1s / background 3s) or
+    // the calibration sheet is streaming. A zero lastSensorSent (boot /
+    // READ_SENSORS command) forces an immediate read.
+    unsigned long now = millis();
+    if (calibrationStreamActive || streamCadenceMs <= 3000UL || lastSensorSent == 0 || now - lastSensorSent >= SENSOR_READ_INTERVAL_MS) {
+        lastSensorSent = now;
+        for (int i = 0; i < 4; i++) {
+            rawSoilCache[i] = readRawSensor(i);
+            soilMoisture[i] = rawToPercent(i, rawSoilCache[i]);
+        }
+    }
+
     JsonArray soil = doc["soil"].to<JsonArray>();
     JsonArray rawSoil = doc["raw_soil"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
-        int raw = analogRead(pumps[i].sensorPin);
-        rawSoil.add(raw);
-        int percent = map(raw, 4095, 1000, 0, 100);
-        soil.add(constrain(percent, 0, 100));
+        rawSoil.add(rawSoilCache[i]);
+        soil.add(soilMoisture[i]);
     }
 
     doc["wifi_rssi"] = WiFi.RSSI();
@@ -143,6 +173,30 @@ void broadcastTelemetry() {
     JsonArray pumpsState = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
         pumpsState.add(pumps[i].isOn);
+    }
+
+    // Full per-motor config rides along so the app stays in sync without a
+    // separate request while the WebSocket is open (version/last_modified let
+    // the app decide which side is newer).
+    JsonArray motors = doc["motors"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) {
+        JsonObject m = motors.add<JsonObject>();
+        m["id"] = i + 1;
+        m["version"] = motorConfigs[i].version;
+        m["last_modified"] = motorConfigs[i].lastModified;
+        m["mode"] = !motorConfigs[i].isEnabled ? "off"
+                    : (motorConfigs[i].autoMode ? "auto" : "scheduled");
+        m["amount_ml"] = motorConfigs[i].amountMl;
+        m["threshold"] = motorConfigs[i].moistureThreshold;
+        m["min_interval_hours"] = motorConfigs[i].minIntervalHours;
+        m["calibration_dry"] = motorConfigs[i].calibrationDry;
+        m["calibration_wet"] = motorConfigs[i].calibrationWet;
+        JsonArray sched = m["schedules"].to<JsonArray>();
+        for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
+            JsonObject s = sched.add<JsonObject>();
+            s["hour"] = motorConfigs[i].schedules[j].hour;
+            s["minute"] = motorConfigs[i].schedules[j].minute;
+        }
     }
 
     String msg;
@@ -213,11 +267,32 @@ void updateStatusLed() {
     }
 }
 
+// Averages several ADC samples to suppress ESP32 analog noise.
+int readRawSensor(int index) {
+    if (index < 0 || index >= 4) return 0;
+    long total = 0;
+    const int SAMPLES = 4;
+    for (int s = 0; s < SAMPLES; s++) {
+        total += analogRead(pumps[index].sensorPin);
+        delay(2);
+    }
+    return (int)(total / SAMPLES);
+}
+
+// Maps a raw ADC reading to 0..100% using the sensor's stored dry/wet points.
+int rawToPercent(int index, int raw) {
+    if (index < 0 || index >= 4) return 0;
+    int dry = motorConfigs[index].calibrationDry;
+    int wet = motorConfigs[index].calibrationWet;
+    // Guard against uncalibrated / inverted values.
+    if (dry <= wet) return 50;
+    int percent = map(raw, dry, wet, 0, 100);
+    return constrain(percent, 0, 100);
+}
+
 int readMoisture(int index) {
     if (index < 0 || index >= 4) return 0;
-    int raw = analogRead(pumps[index].sensorPin);
-    int percent = map(raw, 4095, 1000, 0, 100);
-    return constrain(percent, 0, 100);
+    return rawToPercent(index, readRawSensor(index));
 }
 
 void triggerPump(int index, int amountMl, const char* source = "manual") {
@@ -267,6 +342,12 @@ void stopPump(int index) {
         ws.textAll(msg);
     }
 
+    // Record the completion time so auto watering respects minIntervalHours.
+    // Only real "auto" waterings gate the next auto trigger.
+    if (pumps[index].lastTriggerSource != nullptr && strcmp(pumps[index].lastTriggerSource, "auto") == 0) {
+        lastAutoWaterEpoch[index] = getNow();
+    }
+
     pumps[index].startTime = 0;
     pumps[index].duration = 0;
 }
@@ -301,11 +382,16 @@ void loadConfigs() {
         memset(&motorConfigs[i-1], 0, sizeof(MotorSettings));
         if (preferences.isKey(key)) {
             preferences.getBytes(key, &motorConfigs[i-1], sizeof(MotorSettings));
+            // Guard against fields zeroed by older NVS blobs / memset.
+            if (motorConfigs[i-1].calibrationDry <= 0) motorConfigs[i-1].calibrationDry = 4095;
+            if (motorConfigs[i-1].calibrationWet <= 0) motorConfigs[i-1].calibrationWet = 1000;
         } else {
             motorConfigs[i-1].isEnabled = true;
             motorConfigs[i-1].autoMode = false;
             motorConfigs[i-1].amountMl = 50;
             motorConfigs[i-1].moistureThreshold = 30;
+            motorConfigs[i-1].calibrationDry = 4095;
+            motorConfigs[i-1].calibrationWet = 1000;
             motorConfigs[i-1].version = 0;
             motorConfigs[i-1].lastModified = 0;
             motorConfigs[i-1].scheduleCount = 0;
@@ -356,8 +442,14 @@ void checkSchedules() {
 }
 
 void checkAutoWatering() {
+    unsigned long nowEpoch = getNow();
     for (int i = 0; i < 4; i++) {
         if (!motorConfigs[i].isEnabled || !motorConfigs[i].autoMode) continue;
+
+        // Respect the per-plant min auto-water interval (0 = no limit).
+        unsigned long minGap = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
+        if (lastAutoWaterEpoch[i] != 0 && nowEpoch != 0 && (nowEpoch - lastAutoWaterEpoch[i]) < minGap) continue;
+
         int moisture = readMoisture(i);
         soilMoisture[i] = moisture;
         if (moisture < motorConfigs[i].moistureThreshold) {
@@ -371,7 +463,7 @@ void checkAutoWatering() {
 
 const char SETUP_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>PlantPilot Setup</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;background:#121212;color:#B6FF3C;padding:20px;text-align:center}select,input{width:100%;padding:12px;margin:10px 0;border:1px solid #B6FF3C;background:#1e1e1e;color:white;border-radius:8px;box-sizing:border-box}.show-pass{margin:5px 0;color:#aaa;font-size:.9em;display:flex;align-items:center;cursor:pointer}.show-pass input{width:auto;margin-right:10px}button{background:#B6FF3C;color:#121212;border:none;padding:15px;width:100%;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:10px}.refresh-btn{background:#333;color:#B6FF3C;border:1px solid #B6FF3C;margin-bottom:20px}</style><script>function togglePass(){var x=document.getElementById("pass");x.type=x.type==="password"?"text":"password"}</script></head><body><h1>PlantPilot Setup</h1><p>Connect your ESP32 to WiFi</p><button class="refresh-btn" onclick="location.reload()">Refresh Networks</button><form action="/save" method="POST"><label style="display:block;text-align:left">Select WiFi:</label><select name="ssid" required>{{SCAN_RESULTS}}</select><label style="display:block;text-align:left;margin-top:10px">Password:</label><input type="password" id="pass" name="pass" placeholder="Enter Password"><div class="show-pass"><input type="checkbox" onclick="togglePass()"> Show Password</div><button type="submit">Save and Connect</button></form></body></html>)rawliteral";
 
-const char CONNECTING_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>PlantPilot Connected</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;background:#121212;color:#B6FF3C;padding:20px;text-align:center}.loader{border:4px solid #1e1e1e;border-top:4px solid #B6FF3C;border-radius:50%;width:40px;height:40px;animation:spin 2s linear infinite;margin:20px auto}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}#status{font-size:1.2em;margin-bottom:10px}.host{background:#1e1e1e;border:1px solid #333;padding:10px;border-radius:8px;margin:10px 0;color:white;font-weight:bold}#ip-box{background:#1e1e1e;border:1px solid #B6FF3C;padding:15px;border-radius:8px;margin:20px 0;display:none}.note{color:#aaa;font-size:.9em;margin-bottom:8px}#ip{font-size:1.5em;font-weight:bold;color:white;display:block;margin-bottom:10px}button{background:#B6FF3C;color:#121212;border:none;padding:10px 20px;font-weight:bold;border-radius:5px;cursor:pointer}#countdown{margin-top:20px;color:#aaa;display:none}</style><script>let connected=false;function checkStatus(){fetch('/api/wifi_status').then(r=>r.json()).then(data=>{if(data.status===3&&data.ip!=="0.0.0.0"){document.getElementById("status").innerText="Connected!";document.getElementById("ip").innerText=data.ip;document.getElementById("ip-box").style.display="block";document.querySelector(".loader").style.display="none";document.getElementById("countdown").style.display="block";if(!connected){connected=true;startCountdown()}}else{setTimeout(checkStatus,1000)}}).catch(()=>setTimeout(checkStatus,1000))}function copyIp(){const ip=document.getElementById("ip").innerText;navigator.clipboard.writeText(ip).then(()=>{const btn=document.getElementById("copy-btn");btn.innerText="Copied!";setTimeout(()=>btn.innerText="Copy IP",2000)})}function startCountdown(){let count=10;setInterval(()=>{count--;document.getElementById("timer").innerText=count},1000)}window.onload=checkStatus;</script></head><body><h1>PlantPilot</h1><div id="status">Connecting to WiFi...</div><div class="loader"></div><div class="host">App connects to <b>plantpilot.local</b> by default</div><div id="ip-box"><div class="note">If the app can't connect, enter this IP:</div><span id="ip"></span><button id="copy-btn" onclick="copyIp()">Copy IP</button></div><div id="countdown">Restarting in <span id="timer">10</span> seconds...</div></body></html>)rawliteral";
+const char CONNECTING_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>PlantPilot Connected</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;background:#121212;color:#B6FF3C;padding:20px;text-align:center}.loader{border:4px solid #1e1e1e;border-top:4px solid #B6FF3C;border-radius:50%;width:40px;height:40px;animation:spin 2s linear infinite;margin:20px auto}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}#status{font-size:1.2em;margin-bottom:10px}.host{background:#1e1e1e;border:1px solid #333;padding:10px;border-radius:8px;margin:10px 0;color:white;font-weight:bold}#ip-box{background:#1e1e1e;border:1px solid #B6FF3C;padding:15px;border-radius:8px;margin:20px 0;display:none}.note{color:#aaa;font-size:.9em;margin-bottom:8px}#ip{font-size:1.5em;font-weight:bold;color:white;display:block;margin-bottom:10px}button{background:#B6FF3C;color:#121212;border:none;padding:10px 20px;font-weight:bold;border-radius:5px;cursor:pointer}#countdown{margin-top:20px;color:#aaa;display:none}</style><script>let connected=false;function checkStatus(){fetch('/api/wifi_status').then(r=>r.json()).then(data=>{if(data.status===3&&data.ip!=="0.0.0.0"){document.getElementById("status").innerText="Connected!";document.getElementById("ip").innerText=data.ip;document.getElementById("ip-box").style.display="block";document.querySelector(".loader").style.display="none";document.getElementById("countdown").style.display="block";if(!connected){connected=true;startCountdown()}}else{setTimeout(checkStatus,1000)}}).catch(()=>setTimeout(checkStatus,1000))}function copyIp(){const ip=document.getElementById("ip").innerText;navigator.clipboard.writeText(ip).then(()=>{const btn=document.getElementById("copy-btn");btn.innerText="Copied!";setTimeout(()=>btn.innerText="Copy IP",2000)})}function startCountdown(){let count=10;const timer=setInterval(()=>{count--;if(count<=0){count=0;clearInterval(timer)}document.getElementById("timer").innerText=count},1000)}window.onload=checkStatus;</script></head><body><h1>PlantPilot</h1><div id="status">Connecting to WiFi...</div><div class="loader"></div><div class="host">App connects to <b>plantpilot.local</b> by default</div><div id="ip-box"><div class="note">If the app can't connect, enter this IP:</div><span id="ip"></span><button id="copy-btn" onclick="copyIp()">Copy IP</button></div><div id="countdown">Restarting in <span id="timer">10</span> seconds...</div></body></html>)rawliteral";
 
 String getScanResults() {
     int n = WiFi.scanNetworks();
@@ -387,6 +479,12 @@ void startSetupMode() {
     setupModeActive = true;
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(SETUP_SSID);
+    Serial.println("[SETUP] ==============================");
+    Serial.println("[SETUP] SETUP MODE ACTIVE");
+    Serial.printf("[SETUP] Connect to WiFi network: %s\n", SETUP_SSID);
+    Serial.printf("[SETUP] Setup page: http://%s\n", WiFi.softAPIP().toString().c_str());
+    Serial.println("[SETUP] Open browser, choose your network, save credentials.");
+    Serial.println("[SETUP] ==============================");
     dnsServer.start(53, "*", WiFi.softAPIP());
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         String html = String(FPSTR(SETUP_HTML));
@@ -401,7 +499,7 @@ void startSetupMode() {
         preferences.begin("wifi", false); preferences.putString("ssid", request->arg("ssid")); preferences.putString("pass", request->arg("pass")); preferences.end();
         WiFi.begin(request->arg("ssid").c_str(), request->arg("pass").c_str());
         request->send(200, "text/html", String(FPSTR(CONNECTING_HTML)));
-        pendingRestart = true; restartTime = millis() + 60000;
+        pendingRestart = true; restartTime = millis() + 30000;
     });
     server.onNotFound([](AsyncWebServerRequest *request){ request->redirect("/"); });
     server.begin();
@@ -411,7 +509,33 @@ void startSetupMode() {
 
 void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     cmd.trim();
-    if (cmd == "STATUS") {
+    if (cmd == "READ_SENSORS") {
+        // Force an immediate sensor read + telemetry push (app open/resume).
+        lastSensorSent = 0;
+        broadcastTelemetry();
+    } else if (cmd.startsWith("SYNC_MODE ")) {
+        // App signals its lifecycle: foreground 1s, background 3s. Clamped so a
+        // bad value can't starve or flood the stream.
+        int seconds = cmd.substring(10).toInt();
+        if (seconds < 1) seconds = 1;
+        if (seconds > 30) seconds = 30;
+        streamCadenceMs = (unsigned long)seconds * 1000UL;
+        Serial.printf("[%s] [SYNC] Stream cadence set to %ds\n", getLocalTimeStr().c_str(), seconds);
+        JsonDocument doc;
+        doc["type"] = "ok";
+        doc["cmd"] = "SYNC_MODE";
+        doc["cadence"] = seconds;
+        String resp; serializeJson(doc, resp);
+        client->text(resp);
+    } else if (cmd == "CAL_STREAM_ON") {
+        calibrationStreamActive = true;
+        Serial.println("[SENSOR] Calibration streaming ON (1s cadence)");
+        client->text("{\"type\":\"ok\",\"cmd\":\"CAL_STREAM_ON\"}");
+    } else if (cmd == "CAL_STREAM_OFF") {
+        calibrationStreamActive = false;
+        Serial.println("[SENSOR] Calibration streaming OFF");
+        client->text("{\"type\":\"ok\",\"cmd\":\"CAL_STREAM_OFF\"}");
+    } else if (cmd == "STATUS") {
         String status = ""; for (int i = 0; i < 4; i++) status += "Pump" + String(i + 1) + ": " + (pumps[i].isOn ? "ON" : "OFF") + (i < 3 ? "\n" : "");
         client->text(status);
     } else if (cmd == "PUMP_ALL_ON") {
@@ -490,6 +614,9 @@ void setupApi() {
                        : (motorConfigs[i].autoMode ? "auto" : "scheduled");
             m["amount_ml"] = motorConfigs[i].amountMl;
             m["threshold"] = motorConfigs[i].moistureThreshold;
+            m["min_interval_hours"] = motorConfigs[i].minIntervalHours;
+            m["calibration_dry"] = motorConfigs[i].calibrationDry;
+            m["calibration_wet"] = motorConfigs[i].calibrationWet;
             JsonArray sched = m["schedules"].to<JsonArray>();
             for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
                 JsonObject s = sched.add<JsonObject>();
@@ -535,6 +662,7 @@ void setupApi() {
                 motorConfigs[idx].autoMode = (strcmp(mode, "auto") == 0);
                 motorConfigs[idx].amountMl = m["amount_ml"];
                 motorConfigs[idx].moistureThreshold = m["threshold"];
+                motorConfigs[idx].minIntervalHours = max((int)m["min_interval_hours"], 0);
                 motorConfigs[idx].version = newVersion;
                 motorConfigs[idx].lastModified = incomingLastModified;
 
@@ -555,6 +683,30 @@ void setupApi() {
         request->send(200, "application/json", res);
     });
 
+    // Store per-sensor dry/wet calibration in NVS and recompute moisture.
+    server.on("/api/calibrate", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+      [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+        JsonDocument doc;
+        deserializeJson(doc, data, len);
+        int motor = doc["motor"];
+        int dry = doc["dry"];
+        int wet = doc["wet"];
+        if (motor < 1 || motor > 4 || dry <= wet) {
+            request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"dry must exceed wet\"}");
+            return;
+        }
+        int idx = motor - 1;
+        motorConfigs[idx].calibrationDry = dry;
+        motorConfigs[idx].calibrationWet = wet;
+        motorConfigs[idx].version++;
+        motorConfigs[idx].lastModified = getNow();
+        saveMotorConfig(motor);
+        soilMoisture[idx] = readMoisture(idx);
+        Serial.printf("[%s] [CAL] Sensor %d calibrated dry=%d wet=%d (v%d)\n",
+            getLocalTimeStr().c_str(), motor, dry, wet, motorConfigs[idx].version);
+        request->send(200, "application/json", "{\"status\":\"ok\",\"sensor\":" + String(motor) + "}");
+    });
+
     for (int m = 1; m <= 4; m++) {
         char path[32]; sprintf(path, "/api/motor/%d/water_now", m);
         server.on(path, HTTP_POST, [m](AsyncWebServerRequest *request){
@@ -567,7 +719,14 @@ void setupApi() {
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_CONNECTED: Serial.println("[WIFI] Connected to AP"); break;
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP: Serial.printf("[%s] [WIFI] IP: %s\n", getLocalTimeStr().c_str(), WiFi.localIP().toString().c_str()); wasConnected = true; break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            Serial.printf("[%s] [WIFI] IP: %s\n", getLocalTimeStr().c_str(), WiFi.localIP().toString().c_str());
+            wasConnected = true;
+            // After setup-mode credentials are saved, restart 10s after getting
+            // an IP so the device comes up in normal STA mode (matches the page
+            // countdown).
+            if (pendingRestart) { restartTime = millis() + 10000; }
+            break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             lastWiFiReason = info.wifi_sta_disconnected.reason;
             if (wasConnected) { Serial.printf("[%s] [WIFI] Lost, Reason: %d\n", getLocalTimeStr().c_str(), lastWiFiReason); wasConnected = false; }
@@ -613,7 +772,10 @@ void loop() {
     ws.cleanupClients(); updatePumps();
 
     static unsigned long lastTele = 0;
-    int telemetryMs = (ws.count() > 0) ? 3000 : 60000;
+    // Realtime raw stream while calibrating, otherwise the app-requested
+    // cadence (SYNC_MODE) while a client is connected, else idle 60s.
+    unsigned long telemetryMs = calibrationStreamActive ? 1000UL
+                    : (ws.count() > 0 ? streamCadenceMs : 60000UL);
     if (nowMs - lastTele > telemetryMs) { lastTele = nowMs; broadcastTelemetry(); }
 
     static unsigned long lastCheck = 0;

@@ -92,12 +92,13 @@ fun PlantCard(
                 AssistChip(
                     onClick = {},
                     label = {
-                        val text = if (plant.wateringMode == WateringMode.AUTOMATIC) {
-                            "Auto"
-                        } else {
-                            if (plant.schedules.isEmpty()) "No Schedule"
-                            else plant.schedules.joinToString(", ") { 
-                                TimeUtils.formatTime(it.hour, it.minute, use24HourFormat)
+                        val text = when (plant.wateringMode) {
+                            WateringMode.AUTOMATIC -> "Auto · ${plant.moistureThreshold}%"
+                            else -> {
+                                if (plant.schedules.isEmpty()) "No Schedule"
+                                else plant.schedules.joinToString(", ") {
+                                    TimeUtils.formatTime(it.hour, it.minute, use24HourFormat)
+                                }
                             }
                         }
                         Text(

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -13,15 +15,30 @@ android {
         applicationId = "com.plantpilot"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    val signingPropertiesFile = rootProject.file("signing.properties")
+    signingConfigs {
+        if (signingPropertiesFile.exists()) {
+            val properties = Properties()
+            properties.load(signingPropertiesFile.inputStream())
+            create("release") {
+                storeFile = file(properties.getProperty("STORE_FILE"))
+                storePassword = properties.getProperty("STORE_PASSWORD")
+                keyAlias = properties.getProperty("KEY_ALIAS")
+                keyPassword = properties.getProperty("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

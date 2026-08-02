@@ -15,7 +15,8 @@ data class DeviceStatusResponse(
     val free_heap: Int? = null,
     val raw_soil: List<Int>? = null,
     val epoch: Long? = null,
-    val pumps: List<Boolean>? = null
+    val pumps: List<Boolean>? = null,
+    val motors: List<DeviceMotorConfig>? = null
 )
 
 @Serializable
@@ -25,6 +26,7 @@ data class MotorConfig(
     val mode: String, // "off", "auto", "scheduled"
     val amount_ml: Int,
     val threshold: Int? = null,
+    val min_interval_hours: Int = 0,
     val version: Int = 1,
     val last_modified: Long = 0, // epoch seconds, used for two-way sync
     val schedules: List<WateringSchedule> = emptyList()
@@ -71,12 +73,22 @@ data class DeviceMotorConfig(
     val mode: String = "off", // "off", "auto", "scheduled"
     val amount_ml: Int = 0,
     val threshold: Int? = null,
+    val min_interval_hours: Int? = null,
+    val calibration_dry: Int? = null,
+    val calibration_wet: Int? = null,
     val schedules: List<DeviceSchedule> = emptyList()
 )
 
 @Serializable
 data class DeviceConfigResponse(
     val motors: List<DeviceMotorConfig> = emptyList()
+)
+
+@Serializable
+data class CalibrationRequest(
+    val motor: Int,
+    val dry: Int,
+    val wet: Int
 )
 
 interface ApiService {
@@ -91,4 +103,7 @@ interface ApiService {
 
     @GET("/api/config")
     suspend fun getConfig(): Response<DeviceConfigResponse>
+
+    @POST("/api/calibrate")
+    suspend fun calibrate(@Body request: CalibrationRequest): Response<GenericResponse>
 }

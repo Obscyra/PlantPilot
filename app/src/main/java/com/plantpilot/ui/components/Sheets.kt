@@ -24,10 +24,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.plantpilot.model.*
-import kotlinx.coroutines.delay
 import java.util.Locale
 import java.util.UUID
-import kotlin.random.Random
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -167,59 +165,70 @@ private const val CAL_SCALE_MAX = 4095
 fun CalibrationBottomSheet(
     onDismiss: () -> Unit,
     onSave: (sensorId: Int, dryValue: Int, wetValue: Int) -> Unit,
-    liveReadings: Map<Int, Int> = emptyMap()
+    liveReadings: Map<Int, Int> = emptyMap(),
+    existingCalibration: Map<Int, Pair<Int, Int>> = emptyMap(),
+    isConnected: Boolean = true,
+    onStreamingChange: (Boolean) -> Unit = {}
 ) {
     var selectedSensor by remember { mutableIntStateOf(1) }
-    var dryValue by remember { mutableIntStateOf(4095) }
-    var wetValue by remember { mutableIntStateOf(1400) }
+    val initial = existingCalibration[selectedSensor]
+    var dryValue by remember(selectedSensor) { mutableIntStateOf(initial?.first ?: 4095) }
+    var wetValue by remember(selectedSensor) { mutableIntStateOf(initial?.second ?: 1400) }
 
-    // Simulated live readings until real telemetry is wired in.
-    // baseReading varies per sensor so each one looks distinct.
-    val baseReadings = remember { mapOf(1 to 2600, 2 to 2150, 3 to 2900, 4 to 2300) }
-    var simulatedReading by remember(selectedSensor) {
-        mutableIntStateOf(baseReadings[selectedSensor] ?: 2400)
-    }
-    LaunchedEffect(selectedSensor) {
-        while (true) {
-            delay(600)
-            simulatedReading = (simulatedReading + Random.nextInt(-70, 71)).coerceIn(200, 4095)
-        }
-    }
-    val liveReading = liveReadings[selectedSensor] ?: simulatedReading
+    // Real raw ADC reading from live telemetry (raw_soil, sensor index + 1).
+    val liveReading = liveReadings[selectedSensor]
 
-    val percent = ((dryValue - liveReading).toFloat() / (dryValue - wetValue).toFloat())
-        .coerceIn(0f, 1f)
+    val percent = if (liveReading != null) {
+        ((dryValue - liveReading).toFloat() / (dryValue - wetValue).toFloat()).coerceIn(0f, 1f)
+    } else 0f
+
+    // Request the realtime 1s sensor stream while the sheet is open and stop it
+    // as soon as the sheet leaves composition (dismissed).
+    LaunchedEffect(isConnected) {
+        if (isConnected) onStreamingChange(true)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onStreamingChange(false) }
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Column(
             modifier = Modifier
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp)
-                .verticalScroll(rememberScrollState())
+                .fillMaxHeight()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
         ) {
             Text(
                 text = "Sensor Calibration",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "Select a sensor, read its live value, then map that reading to dry and wet.",
+                text = "Select a sensor, read its live raw value, then map that reading to dry and wet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Sensor selector
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 for (sensor in 1..4) {
                     SegmentedButton(
                         selected = selectedSensor == sensor,
-                        onClick = { selectedSensor = sensor },
+                        onClick = {
+                            selectedSensor = sensor
+                            val cal = existingCalibration[sensor]
+                            dryValue = cal?.first ?: 4095
+                            wetValue = cal?.second ?: 1400
+                        },
                         shape = SegmentedButtonDefaults.itemShape(
                             index = sensor - 1,
                             count = 4
@@ -230,7 +239,7 @@ fun CalibrationBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Live reading card
             Surface(
@@ -245,22 +254,22 @@ fun CalibrationBottomSheet(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        PulsingDot(isVisible = true)
+                        PulsingDot(isVisible = liveReading != null)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Live Reading",
+                            text = if (isConnected) "Live Reading" else "Device Offline",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = liveReading.toString(),
+                        text = liveReading?.toString() ?: if (isConnected) "Waiting for telemetry..." else "--",
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = if (liveReading != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Sensor $selectedSensor raw value",
                         style = MaterialTheme.typography.labelSmall,
@@ -269,7 +278,7 @@ fun CalibrationBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Moisture preview for the current reading
             Row(
@@ -283,7 +292,7 @@ fun CalibrationBottomSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "${(percent * 100).toInt()}%",
+                    text = if (liveReading != null) "${(percent * 100).toInt()}%" else "--",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = if (percent > 0.3f) Color(0xFF2E7D32) else Color(0xFFFBC02D)
@@ -293,17 +302,18 @@ fun CalibrationBottomSheet(
 
             // Scale with markers
             CalibrationScale(
-                liveReading = liveReading,
+                liveReading = liveReading ?: dryValue,
                 dryValue = dryValue,
                 wetValue = wetValue
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Map buttons
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    onClick = { wetValue = liveReading },
+                    onClick = { liveReading?.let { wetValue = it } },
+                    enabled = liveReading != null,
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.WaterDrop, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -311,7 +321,8 @@ fun CalibrationBottomSheet(
                     Text("Set as Wet")
                 }
                 OutlinedButton(
-                    onClick = { dryValue = liveReading },
+                    onClick = { liveReading?.let { dryValue = it } },
+                    enabled = liveReading != null,
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.WbSunny, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -323,10 +334,10 @@ fun CalibrationBottomSheet(
                 text = "Tip: with the sensor in open air tap 'Set as Dry'. Submerge it in water and tap 'Set as Wet'.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp)
+                modifier = Modifier.padding(top = 4.dp)
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Fine-tune values
             Row(
@@ -347,7 +358,7 @@ fun CalibrationBottomSheet(
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.weight(1f))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -362,7 +373,7 @@ fun CalibrationBottomSheet(
                         onSave(selectedSensor, dryValue, wetValue)
                         onDismiss()
                     },
-                    enabled = dryValue > wetValue
+                    enabled = dryValue > wetValue && isConnected
                 ) {
                     Text("Save Calibration")
                 }

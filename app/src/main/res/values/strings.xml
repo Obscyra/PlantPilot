@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PlantPilot</string>
+    <string name="sync_service_channel_name">Background Sync</string>
+    <string name="sync_service_channel_desc">Keeps live device telemetry flowing while the app is in the background</string>
+    <string name="sync_service_title">PlantPilot is syncing</string>
+    <string name="sync_service_text">Keeping your plants and device in sync</string>
 </resources>

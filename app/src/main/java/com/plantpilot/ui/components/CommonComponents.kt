@@ -4,46 +4,70 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 import com.plantpilot.util.bounceClick
+import com.plantpilot.viewmodel.PlantPilotViewModel
 
 @Composable
-fun DeviceConnectionChip(
+fun ConnectionStatusChip(
     isConnected: Boolean,
-    isConnecting: Boolean = false,
     modifier: Modifier = Modifier,
+    isConnecting: Boolean = false,
+    isSyncing: Boolean = false,
+    isConfigDirty: Boolean = false,
     onClick: () -> Unit
 ) {
-    val label = when {
-        isConnecting -> "Connecting..."
-        isConnected -> "Connected"
-        else -> "Disconnected"
-    }
-    val icon = when {
-        isConnecting -> Icons.Default.Refresh
-        isConnected -> Icons.Default.Wifi
-        else -> Icons.Default.WifiOff
-    }
-    val containerColor = when {
-        isConnecting -> MaterialTheme.colorScheme.surfaceVariant
-        isConnected -> MaterialTheme.colorScheme.primaryContainer
-        else -> MaterialTheme.colorScheme.errorContainer
-    }
-    val contentColor = when {
-        isConnecting -> MaterialTheme.colorScheme.onSurfaceVariant
-        isConnected -> MaterialTheme.colorScheme.onPrimaryContainer
-        else -> MaterialTheme.colorScheme.onErrorContainer
+    // One live status in a single box, no artificial delay. The inputs
+    // (isConnecting/isConnected/isSyncing) are StateFlows updated directly by
+    // the WebSocket callbacks, so the chip flips Disconnected -> Connecting ->
+    // Connected in real time. The "Updating" state shares the box with the
+    // Connected state.
+    val label: String
+    val icon: ImageVector?
+    val containerColor: Color
+    val contentColor: Color
+    var showSpinner = false
+    when {
+        isSyncing -> {
+            label = "Updating..."
+            icon = null
+            showSpinner = true
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        isConnecting -> {
+            label = "Connecting..."
+            icon = null
+            showSpinner = true
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        isConnected -> {
+            label = if (isConfigDirty) "Update" else "Connected"
+            icon = if (isConfigDirty) Icons.Default.CloudUpload else Icons.Default.Wifi
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        }
+        else -> {
+            label = "Disconnected"
+            icon = Icons.Default.WifiOff
+            containerColor = MaterialTheme.colorScheme.errorContainer
+            contentColor = MaterialTheme.colorScheme.onErrorContainer
+        }
     }
 
     Surface(
@@ -56,7 +80,7 @@ fun DeviceConnectionChip(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isConnecting) {
+            if (showSpinner) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -64,7 +88,7 @@ fun DeviceConnectionChip(
                 )
             } else {
                 Icon(
-                    imageVector = icon,
+                    imageVector = icon!!,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                     tint = contentColor
@@ -79,6 +103,28 @@ fun DeviceConnectionChip(
             )
         }
     }
+}
+
+/** Convenience wrapper that reads the live connection/sync state from the
+ *  ViewModel and renders the unified status chip. Used in every tab's TopAppBar. */
+@Composable
+fun ConnectionStatusChip(
+    viewModel: PlantPilotViewModel,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isConnected by viewModel.isConnected.collectAsState()
+    val isConnecting by viewModel.isConnecting.collectAsState()
+    val isSyncing = viewModel.isSyncing
+    val isConfigDirty = viewModel.isConfigDirty
+    ConnectionStatusChip(
+        isConnected = isConnected,
+        isConnecting = isConnecting,
+        isSyncing = isSyncing,
+        isConfigDirty = isConfigDirty,
+        modifier = modifier,
+        onClick = onClick
+    )
 }
 
 @Composable

@@ -23,40 +23,18 @@ import kotlin.time.Duration.Companion.milliseconds
 @Composable
 fun HomeScreen(
     viewModel: PlantPilotViewModel,
+    onStatusChipClick: () -> Unit,
     onPlantClick: (String) -> Unit,
 ) {
     val plants by viewModel.plants.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val deviceState by viewModel.deviceState.collectAsState()
-    val isConnecting by viewModel.isConnecting.collectAsState()
-    // Live WebSocket state is the single source of truth — never derived from
-    // cached deviceState or a stored placeholder.
     val isConnected by viewModel.isConnected.collectAsState()
     var isRefreshing by remember { mutableStateOf(value = false) }
     var showWateringSnackbar by remember { mutableStateOf(value = false) }
     var wateringPlantName by remember { mutableStateOf(value = "") }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-
-    var showConnectionDialog by remember { mutableStateOf(false) }
-
-    LaunchedEffect(viewModel.isRefreshingDevice) {
-        if (viewModel.isRefreshingDevice) {
-            snackbarHostState.showSnackbar(
-                message = "Refreshing device status...",
-                duration = SnackbarDuration.Short
-            )
-        }
-    }
-
-    LaunchedEffect(viewModel.connectionError) {
-        viewModel.connectionError?.let { error ->
-            snackbarHostState.showSnackbar(
-                message = "Device Error: $error",
-                duration = SnackbarDuration.Short
-            )
-        }
-    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -69,10 +47,12 @@ fun HomeScreen(
                     )
                 },
                 actions = {
-                    DeviceConnectionChip(
-                        isConnected = isConnected,
-                        isConnecting = isConnecting
-                    ) { showConnectionDialog = true }
+                    // Unified live status chip; connection is silent/automatic,
+                    // so no error snackbars are shown for offline/retry.
+                    ConnectionStatusChip(
+                        viewModel = viewModel,
+                        onClick = onStatusChipClick
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                 },
             )
@@ -170,17 +150,5 @@ fun HomeScreen(
         if (showWateringSnackbar) {
             WateringOverlay(plantName = wateringPlantName)
         }
-    }
-
-    // Connection dialog
-    if (showConnectionDialog) {
-        DeviceConnectionDialog(
-            isConnected = isConnected,
-            isConnecting = isConnecting,
-            deviceIp = deviceState.deviceIp,
-            onConnect = { viewModel.connectToDevice() },
-            onDisconnect = { viewModel.disconnectFromDevice() },
-            onDismiss = { showConnectionDialog = false }
-        )
     }
 }
