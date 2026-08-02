@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -25,16 +28,25 @@ import com.plantpilot.viewmodel.PlantPilotViewModel
 import com.plantpilot.viewmodel.PumpTestViewModel
 
 class MainActivity : ComponentActivity() {
+    private val viewModel: PlantPilotViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
         }
-        setContent {
-            val viewModel: PlantPilotViewModel = viewModel()
 
+        // Re-check the ESP32 connection every time the app returns to the
+        // foreground (recents switcher, back to app, etc.), not just on cold start.
+        lifecycle.addObserver(LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onAppResumed()
+            }
+        })
+
+        setContent {
             PlantPilotTheme {
                 PlantPilotApp(viewModel)
             }

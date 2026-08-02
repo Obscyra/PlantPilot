@@ -26,6 +26,7 @@ data class MotorConfig(
     val amount_ml: Int,
     val threshold: Int? = null,
     val version: Int = 1,
+    val last_modified: Long = 0, // epoch seconds, used for two-way sync
     val schedules: List<WateringSchedule> = emptyList()
 )
 
@@ -47,10 +48,47 @@ data class GenericResponse(
     val motor: Int? = null
 )
 
+@Serializable
+data class StatusResponse(
+    val status: String = "",
+    val ip: String? = null,
+    val uptime_sec: Long? = null,
+    val wifi_rssi: Int? = null,
+    val epoch: Long? = null
+)
+
+@Serializable
+data class DeviceSchedule(
+    val hour: Int,
+    val minute: Int
+)
+
+@Serializable
+data class DeviceMotorConfig(
+    val id: Int,
+    val version: Int = 1,
+    val last_modified: Long = 0,
+    val mode: String = "off", // "off", "auto", "scheduled"
+    val amount_ml: Int = 0,
+    val threshold: Int? = null,
+    val schedules: List<DeviceSchedule> = emptyList()
+)
+
+@Serializable
+data class DeviceConfigResponse(
+    val motors: List<DeviceMotorConfig> = emptyList()
+)
+
 interface ApiService {
     @POST("/api/sync")
     suspend fun sync(@Body request: SyncRequest): Response<SyncResponse>
 
     @POST("/api/motor/{id}/water_now")
     suspend fun waterNow(@Path("id") motorId: Int): Response<GenericResponse>
+
+    @GET("/api/status")
+    suspend fun getStatus(): Response<StatusResponse>
+
+    @GET("/api/config")
+    suspend fun getConfig(): Response<DeviceConfigResponse>
 }

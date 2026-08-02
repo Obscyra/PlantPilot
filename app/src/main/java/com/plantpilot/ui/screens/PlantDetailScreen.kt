@@ -32,6 +32,7 @@ fun PlantDetailScreen(
 ) {
     val plants by viewModel.plants.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val isConnected by viewModel.isConnected.collectAsState()
     val plant = plants.find { it.id == plantId }
 
     if (plant == null) {
@@ -410,7 +411,9 @@ fun PlantDetailScreen(
                     onClick = { showWaterNowDialog = true },
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.medium,
-                    enabled = true
+                    // Requires a live ESP32 connection; grayed out when offline
+                    // instead of clickable-then-failing.
+                    enabled = isConnected
                 ) {
                     Icon(imageVector = Icons.Default.WaterDrop, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -454,13 +457,16 @@ fun PlantDetailScreen(
             confirmText = "Water",
             onConfirm = {
                 showWaterNowDialog = false
-                isWatering = true
-                scope.launch {
-                    // Fire the actual watering in the background
-                    scope.launch { viewModel.waterPlant(plantId) }
-                    // Animation lasts exactly 3 seconds regardless of watering duration
-                    kotlinx.coroutines.delay(3000)
-                    isWatering = false
+                // Guard against a connection dropping while the dialog was open.
+                if (isConnected) {
+                    isWatering = true
+                    scope.launch {
+                        // Fire the actual watering in the background
+                        scope.launch { viewModel.waterPlant(plantId) }
+                        // Animation lasts exactly 3 seconds regardless of watering duration
+                        kotlinx.coroutines.delay(3000)
+                        isWatering = false
+                    }
                 }
             },
             onDismiss = { showWaterNowDialog = false }

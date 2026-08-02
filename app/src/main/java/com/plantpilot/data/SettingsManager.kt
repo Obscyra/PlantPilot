@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
+import com.plantpilot.model.Plant
 import com.plantpilot.model.WateringEvent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -31,6 +32,7 @@ class SettingsManager(private val context: Context) {
         val USE_24H: Preferences.Key<Boolean> = booleanPreferencesKey("use_24h")
         val WATERING_HISTORY: Preferences.Key<String> = stringPreferencesKey("watering_history")
         val ONBOARDING_COMPLETED: Preferences.Key<Boolean> = booleanPreferencesKey("onboarding_completed")
+        val PLANTS: Preferences.Key<String> = stringPreferencesKey("plants_config")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -66,6 +68,20 @@ class SettingsManager(private val context: Context) {
         }
     }
 
+    /**
+     * Persisted plant list. Returns null until the user has actually saved a
+     * config (so a fresh install falls back to MockData), then the exact saved
+     * list — including an explicitly empty one.
+     */
+    val plantsFlow: Flow<List<Plant>?> = context.dataStore.data.map { prefs ->
+        val raw = prefs[PLANTS] ?: return@map null
+        try {
+            json.decodeFromString<List<Plant>>(raw)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     suspend fun saveDeviceState(state: DeviceState) {
         context.dataStore.edit { prefs ->
             prefs[DEVICE_NAME] = state.deviceName
@@ -94,6 +110,12 @@ class SettingsManager(private val context: Context) {
         context.dataStore.edit { prefs ->
             val jsonString = json.encodeToString(history.take(50)) // Keep last 50 events
             prefs[WATERING_HISTORY] = jsonString
+        }
+    }
+
+    suspend fun savePlants(plants: List<Plant>) {
+        context.dataStore.edit { prefs ->
+            prefs[PLANTS] = json.encodeToString(plants)
         }
     }
 

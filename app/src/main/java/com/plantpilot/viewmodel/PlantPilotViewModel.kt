@@ -6,7 +6,6 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewModelScope
 import com.plantpilot.model.*
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -23,10 +22,10 @@ import com.plantpilot.data.HardwareRepository
 import com.plantpilot.data.NetworkModule
 import com.plantpilot.data.PlantPilotRepository
 import com.plantpilot.data.SettingsManager
+import com.plantpilot.network.DeviceConfigResponse
 import com.plantpilot.network.MotorConfig
 import com.plantpilot.network.SyncRequest
 import com.plantpilot.util.NotificationHelper
-import com.plantpilot.util.WifiUtils
 import kotlin.time.Duration.Companion.milliseconds
 
 class PlantPilotViewModel(application: Application) : AndroidViewModel(application) {
@@ -42,7 +41,15 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     private val _deviceState = MutableStateFlow(MockData.defaultDeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
 
+    // Single source of truth for ESP32 connectivity: the live WebSocket state,
+    // updated by socket callbacks, heartbeat, lifecycle checks and post-action
+    // responses. UI must derive connection state from these flows, never from
+    // cached DeviceState / defaults.
+    val isConnected = hardwareRepository.isConnected
     val isConnecting = hardwareRepository.isConnecting
+    val telemetry = hardwareRepository.telemetry
+
+    private val POLL_INTERVAL_MS = 30_000L
 
     private val _history = MutableStateFlow<List<WateringEvent>>(emptyList())
     val history: StateFlow<List<WateringEvent>> = _history.asStateFlow()
@@ -72,10 +79,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     // Watering completion tracking: motorNumber -> Deferred that completes on watering_finished event
     private val pendingWatering = ConcurrentHashMap<Int, CompletableDeferred<Boolean>>()
-
-    // Disconnect debounce: delay before marking as disconnected
-    private var disconnectJob: Job? = null
-    private val DISCONNECT_DELAY_MS = 3000L
 
     // Low water reminder: notify at most once per hour while low
     private var lastLowWaterNotifiedAt = 0L
@@ -112,33 +115,15 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        // Observe connection state
+        // Observe connection state (live, no debounce — UI derives directly from isConnected)
         viewModelScope.launch {
             hardwareRepository.isConnected.collect { isConnected ->
-                if (isConnected) {
-                    // Connected: cancel any pending disconnect, update immediately
-                    disconnectJob?.cancel()
-                    disconnectJob = null
-                    val justReconnected = !wasPreviouslyConnected
-                    wasPreviouslyConnected = true
-                    _deviceState.value = _deviceState.value.copy(isConnected = true)
-                    
-                    if (justReconnected) {
-                        syncConfigWithDevice(silent = true, force = true)
-                    }
-                } else {
-                    // Disconnected: debounce - only mark disconnected after3 seconds
-                    if (wasPreviouslyConnected && disconnectJob == null) {
-                        disconnectJob = viewModelScope.launch {
-                            delay(DISCONNECT_DELAY_MS)
-                            // Re-check if still disconnected after delay
-                            if (!hardwareRepository.isConnected.value) {
-                                wasPreviouslyConnected = false
-                                _deviceState.value = _deviceState.value.copy(isConnected = false)
-                            }
-                            disconnectJob = null
-                        }
-                    }
+                val justReconnected = isConnected && !wasPreviouslyConnected
+                wasPreviouslyConnected = isConnected
+                _deviceState.value = _deviceState.value.copy(isConnected = isConnected)
+                if (justReconnected) {
+                    // Two-way sync: pull whatever is newer on the device, push what's newer here.
+                    performTwoWaySync()
                 }
             }
         }
@@ -178,6 +163,16 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             settingsManager.historyFlow.collect { _history.value = it }
         }
 
+        // Load persisted plants (schedules/config survive full app restarts).
+        // Falls back to MockData on a truly fresh install (never-saved).
+        viewModelScope.launch {
+            settingsManager.plantsFlow.collect { saved ->
+                if (saved != null) {
+                    _plants.value = saved
+                }
+            }
+        }
+
         // Observe hardware events (History tracking)
         viewModelScope.launch {
             hardwareRepository.hardwareEvents.collect { event ->
@@ -205,16 +200,23 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
+        isLoading = false
+
+        // Periodic poll: while offline, actively re-check the ESP32 so the UI
+        // connection state recovers as soon as the device is reachable again
+        // (independent of the WebSocket reconnect backoff).
         viewModelScope.launch {
-            delay(500.milliseconds)
-            
-            // Auto-detect current WiFi SSID
-            val currentSsid = WifiUtils.getCurrentSsid(application)
-            if (currentSsid != "Unknown WiFi") {
-                updateDeviceState { it.copy(wifiSsid = currentSsid) } // Uses the setter that SAVES to DataStore
+            while (true) {
+                delay(POLL_INTERVAL_MS)
+                if (!hardwareRepository.isConnected.value) {
+                    val ip = _deviceState.value.deviceIp
+                    if (ip.isNotBlank()) {
+                        val ok = liveCheck()
+                        connectionError = if (ok) null else "Device unreachable"
+                        if (ok) connectToDevice()
+                    }
+                }
             }
-            
-            isLoading = false
         }
     }
 
@@ -240,11 +242,110 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun refreshData() {
-        // Manual refresh now just forces a config sync since status is pushed via WebSocket
-        syncConfigWithDevice(silent = false, force = true)
+        viewModelScope.launch {
+            isRefreshingDevice = true
+            val ok = liveCheck()
+            connectionError = if (ok) null else "Device unreachable"
+            if (ok) {
+                if (!hardwareRepository.isConnected.value) connectToDevice()
+                performTwoWaySync()
+            }
+            isRefreshingDevice = false
+        }
+    }
+
+    /**
+     * Live connectivity handshake (HTTP GET /api/status) against the ESP32.
+     * Never reports a cached/default state as if it were live.
+     */
+    fun checkConnection(onResult: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch {
+            isRefreshingDevice = true
+            val ok = liveCheck()
+            connectionError = if (ok) null else "Device unreachable"
+            if (ok && !hardwareRepository.isConnected.value) {
+                connectToDevice()
+            }
+            isRefreshingDevice = false
+            onResult?.invoke(ok)
+        }
+    }
+
+    /** Called from MainActivity ON_RESUME so the app re-checks when foregrounded. */
+    fun onAppResumed() {
+        viewModelScope.launch {
+            val ok = liveCheck()
+            connectionError = if (ok) null else "Device unreachable"
+            if (ok) {
+                if (hardwareRepository.isConnected.value) {
+                    performTwoWaySync()
+                } else {
+                    connectToDevice()
+                }
+            }
+        }
+    }
+
+    private suspend fun liveCheck(): Boolean {
+        val ip = _deviceState.value.deviceIp
+        if (ip.isBlank()) return false
+        NetworkModule.updateBaseUrl(ip)
+        return repository.checkConnection().isSuccess
+    }
+
+    /**
+     * Two-way config sync. Pulls the ESP32's current config with last-modified
+     * timestamps and, per motor, whichever side is more recent wins. Then pushes
+     * our (possibly updated) config; the firmware independently ignores anything
+     * that isn't newer than what it already stores.
+     */
+    private fun performTwoWaySync() {
+        viewModelScope.launch {
+            val result: Result<DeviceConfigResponse> = repository.fetchDeviceConfig()
+            if (result.isSuccess) {
+                val deviceMotors = result.getOrThrow().motors
+                var changed = false
+                val updatedPlants = _plants.value.map { plant ->
+                    val dev = deviceMotors.find { it.id == plant.motorNumber }
+                    // NOTE: device last_modified is epoch seconds, plant.lastUpdated is epoch millis.
+                    if (dev != null && dev.last_modified * 1000L > plant.lastUpdated) {
+                        changed = true
+                        plant.copy(
+                            wateringMode = devModeToMode(dev.mode),
+                            waterAmountMl = dev.amount_ml,
+                            moistureThreshold = dev.threshold ?: plant.moistureThreshold,
+                            schedules = dev.schedules.map {
+                                WateringSchedule(
+                                    id = UUID.randomUUID().toString(),
+                                    hour = it.hour,
+                                    minute = it.minute,
+                                    daysOfWeek = DayOfWeek.entries.toSet()
+                                )
+                            },
+                            configVersion = dev.version,
+                            lastUpdated = dev.last_modified * 1000
+                        )
+                    } else plant
+                }
+                if (changed) {
+                    _plants.value = updatedPlants
+                    persistPlants()
+                }
+            }
+            syncConfigWithDevice(silent = true, force = true)
+        }
+    }
+
+    private fun devModeToMode(mode: String): WateringMode = when (mode) {
+        "auto" -> WateringMode.AUTOMATIC
+        "scheduled" -> WateringMode.SCHEDULED
+        else -> WateringMode.OFF
     }
 
     suspend fun waterPlant(plantId: String): Boolean {
+        // Refuse immediately when offline — callers disable the button, and this
+        // guards any path that slips through (no click-then-loading-then-fail).
+        if (!hardwareRepository.isConnected.value) return false
         val plant = _plants.value.find { it.id == plantId } ?: return false
         
         notificationHelper.showWateringStarted(plant.name)
@@ -267,10 +368,12 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 }
             } else {
                 pendingWatering.remove(plant.motorNumber)
+                connectionError = "Failed to reach device"
                 false
             }
         } catch (e: Exception) {
             pendingWatering.remove(plant.motorNumber)
+            connectionError = "Failed to reach device"
             false
         }
     }
@@ -320,6 +423,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     amount_ml = plant.waterAmountMl,
                     threshold = plant.moistureThreshold,
                     version = plant.configVersion,
+                    last_modified = plant.lastUpdated / 1000,
                     schedules = plant.schedules
                 )
             }
@@ -349,21 +453,31 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun markConfigDirty(autoSync: Boolean = false) {
         isConfigDirty = true
-        if (autoSync) {
+        // Only auto-sync when actually connected; otherwise edits are persisted
+        // locally and synced on the next connection.
+        if (autoSync && hardwareRepository.isConnected.value) {
             syncConfigWithDevice()
         }
     }
 
     fun updatePlant(plantId: String, update: (Plant) -> Plant) {
-        _plants.value = _plants.value.map {
+        var changed = false
+        val updatedList = _plants.value.map {
             if (it.id == plantId) {
                 val updated = update(it)
                 if (updated != it) {
-                    val versioned = updated.copy(configVersion = updated.configVersion + 1)
-                    markConfigDirty()
-                    versioned
+                    changed = true
+                    updated.copy(
+                        configVersion = updated.configVersion + 1,
+                        lastUpdated = System.currentTimeMillis()
+                    )
                 } else it
             } else it
+        }
+        if (changed) {
+            _plants.value = updatedList
+            markConfigDirty()
+            persistPlants()
         }
     }
 
@@ -400,6 +514,13 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     fun deletePlant(plantId: String) {
         _plants.value = _plants.value.filter { it.id != plantId }
         markConfigDirty(autoSync = true)
+        persistPlants()
+    }
+
+    private fun persistPlants() {
+        viewModelScope.launch {
+            settingsManager.savePlants(_plants.value)
+        }
     }
 
     fun addSchedule(plantId: String, schedule: WateringSchedule) {
@@ -438,7 +559,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun toggleDeviceConnection() {
-        refreshData()
+        if (hardwareRepository.isConnected.value) {
+            disconnectFromDevice()
+        } else {
+            refreshData()
+        }
     }
 
     fun connectToDevice() {

@@ -24,9 +24,7 @@ import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
 import com.plantpilot.ui.components.CalibrationBottomSheet
 import com.plantpilot.viewmodel.PlantPilotViewModel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,6 +35,8 @@ fun SettingsScreen(
 ) {
     val deviceState by viewModel.deviceState.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val isConnected by viewModel.isConnected.collectAsState()
+    val telemetry by viewModel.telemetry.collectAsState()
 
     var deviceName by remember(deviceState.deviceName) { mutableStateOf(value = deviceState.deviceName) }
     var deviceIp by remember(deviceState.deviceIp) { mutableStateOf(value = deviceState.deviceIp) }
@@ -121,18 +121,27 @@ fun SettingsScreen(
                         leadingIcon = { Icon(Icons.Default.Dns, contentDescription = null) }
                     )
 
+                    // SSID is reported by the ESP32 itself via live telemetry.
+                    // When offline we never show a cached/placeholder value as if
+                    // it were the live status — the field is read-only and shows a
+                    // clear "device offline" placeholder instead.
+                    val liveSsid = telemetry?.wifi_ssid?.takeIf { isConnected }
+                        ?: if (isConnected) "Connecting..." else ""
+
                     OutlinedTextField(
-                        value = deviceState.wifiSsid,
-                        onValueChange = {
-                            viewModel.updateDeviceState { s -> s.copy(wifiSsid = it) }
-                        },
+                        value = liveSsid,
+                        onValueChange = {},
+                        readOnly = true,
                         label = { Text("Wi-Fi Network SSID") },
+                        placeholder = {
+                            Text(if (isConnected) "Waiting for telemetry..." else "Device offline")
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Wifi, contentDescription = null) }
                     )
 
-                    if (deviceState.isConnected && viewModel.connectionError == null) {
+                    if (isConnected) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -146,12 +155,14 @@ fun SettingsScreen(
                     ) {
                         Button(
                             onClick = {
-                                scope.launch {
-                                    viewModel.refreshData()
-                                    // Wait for the operation to complete
-                                    delay(200.milliseconds) // Small buffer
-                                    if (viewModel.connectionError == null) {
-                                        snackbarHostState.showSnackbar("Connected successfully!")
+                                // Perform an actual live handshake to the ESP32 and
+                                // only then report success/failure — never cached state.
+                                viewModel.checkConnection { success ->
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            message = if (success) "Connected successfully!" else "Connection failed — device unreachable",
+                                            duration = SnackbarDuration.Long
+                                        )
                                     }
                                 }
                             },
