@@ -23,7 +23,6 @@ import androidx.compose.ui.unit.dp
 import com.plantpilot.R
 import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
-import com.plantpilot.ui.components.CalibrationBottomSheet
 import com.plantpilot.ui.components.ConnectionStatusChip
 import com.plantpilot.viewmodel.PlantPilotViewModel
 import kotlinx.coroutines.launch
@@ -35,6 +34,7 @@ fun SettingsScreen(
     onStatusChipClick: () -> Unit,
     onShowOnboarding: () -> Unit,
     onNavigateToPumpTest: () -> Unit,
+    onNavigateToCalibration: () -> Unit,
 ) {
     val deviceState by viewModel.deviceState.collectAsState()
     val settings by viewModel.settings.collectAsState()
@@ -67,7 +67,6 @@ fun SettingsScreen(
     var showConnectDialog by remember { mutableStateOf(value = false) }
     var connectStep by remember { mutableIntStateOf(value = 0) }
     var showDeveloperInfo by remember { mutableStateOf(value = false) }
-    var showCalibrationSheet by remember { mutableStateOf(value = false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
@@ -425,7 +424,7 @@ fun SettingsScreen(
                     HorizontalDivider()
 
                     Surface(
-                        onClick = { showCalibrationSheet = true },
+                        onClick = onNavigateToCalibration,
                         color = Color.Transparent,
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -470,37 +469,6 @@ fun SettingsScreen(
                         }
                     }
                 }
-            }
-
-            if (showCalibrationSheet) {
-                // Live raw ADC readings (telemetry raw_soil indexed by sensor 1..4).
-                val liveReadings = telemetry?.raw_soil?.let { raw ->
-                    raw.mapIndexedNotNull { index, value -> (index + 1) to value }.toMap()
-                } ?: emptyMap()
-
-                CalibrationBottomSheet(
-                    onDismiss = { showCalibrationSheet = false },
-                    onSave = { sensorId, dry, wet ->
-                        viewModel.calibrateSensor(sensorId, dry, wet) { success ->
-                            scope.launch {
-                                snackbarHostState.showSnackbar(
-                                    message = if (success) {
-                                        "Sensor $sensorId calibrated (Dry: $dry, Wet: $wet)"
-                                    } else {
-                                        "Calibration failed — device unreachable"
-                                    },
-                                    duration = SnackbarDuration.Long
-                                )
-                            }
-                        }
-                    },
-                    liveReadings = liveReadings,
-                    existingCalibration = viewModel.sensorCalibration.collectAsState().value,
-                    isConnected = isConnected,
-                    onStreamingChange = { enabled ->
-                        viewModel.setCalibrationStreaming(enabled)
-                    }
-                )
             }
 
             // About section
