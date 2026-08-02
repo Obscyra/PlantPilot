@@ -19,6 +19,13 @@ const char* HOSTNAME = "plantpilot";
 const char* SETUP_SSID = "PlantPilot-Setup";
 const int ML_PER_SECOND = 10; // Pump flow rate
 
+// --- ONBOARD LED STATUS ---
+// WROOM-32 dev kits expose a built-in blue LED on GPIO 2.
+// Solid = WiFi connected, fast blink = connecting/lost, slow blink = setup mode.
+#define STATUS_LED GPIO_NUM_2
+#define LED_BLINK_CONNECTING_MS 250
+#define LED_BLINK_SETUP_MS      700
+
 // NTP & Time
 const char* NTP_SERVER = "pool.ntp.org";
 const long  GMT_OFFSET_SEC = 21600; // UTC+6
@@ -37,6 +44,7 @@ uint8_t lastWiFiReason = 0;
 bool wasConnected = false;
 unsigned long restartTime = 0;
 bool pendingRestart = false;
+bool setupModeActive = false;
 
 // --- DATA STRUCTURES ---
 struct WateringSchedule {
@@ -50,6 +58,7 @@ struct MotorSettings {
     int amountMl;
     int moistureThreshold;
     int version;
+    unsigned long lastModified; // epoch seconds of last config change (two-way sync)
     WateringSchedule schedules[5];
     int scheduleCount;
 };
@@ -175,6 +184,35 @@ void initRelays() {
     }
 }
 
+void initStatusLed() {
+    pinMode(STATUS_LED, OUTPUT);
+    digitalWrite(STATUS_LED, LOW);
+}
+
+// Non-blocking WiFi status LED:
+//  - Solid ON  : STA connected (WL_CONNECTED)
+//  - Fast blink: connecting to / disconnected from the AP
+//  - Slow blink: SoftAP setup mode (no credentials yet)
+void updateStatusLed() {
+    static unsigned long lastToggle = 0;
+    static bool ledOn = false;
+
+    if (WiFi.status() == WL_CONNECTED) {
+        digitalWrite(STATUS_LED, HIGH);
+        lastToggle = 0;
+        ledOn = true;
+        return;
+    }
+
+    unsigned long interval = setupModeActive ? LED_BLINK_SETUP_MS : LED_BLINK_CONNECTING_MS;
+    unsigned long now = millis();
+    if (lastToggle == 0 || (now - lastToggle) >= interval) {
+        lastToggle = now;
+        ledOn = !ledOn;
+        digitalWrite(STATUS_LED, ledOn ? HIGH : LOW);
+    }
+}
+
 int readMoisture(int index) {
     if (index < 0 || index >= 4) return 0;
     int raw = analogRead(pumps[index].sensorPin);
@@ -258,6 +296,9 @@ void loadConfigs() {
     preferences.begin("plantpilot", true);
     for (int i = 1; i <= 4; i++) {
         char key[16]; sprintf(key, "motor%d", i);
+        // Zero the struct first so fields added in later firmware versions
+        // (e.g. lastModified) never pick up garbage from a shorter NVS blob.
+        memset(&motorConfigs[i-1], 0, sizeof(MotorSettings));
         if (preferences.isKey(key)) {
             preferences.getBytes(key, &motorConfigs[i-1], sizeof(MotorSettings));
         } else {
@@ -266,10 +307,20 @@ void loadConfigs() {
             motorConfigs[i-1].amountMl = 50;
             motorConfigs[i-1].moistureThreshold = 30;
             motorConfigs[i-1].version = 0;
+            motorConfigs[i-1].lastModified = 0;
             motorConfigs[i-1].scheduleCount = 0;
         }
     }
     preferences.end();
+
+    // Boot log proving persisted schedules/configs resume even without the app.
+    for (int i = 0; i < 4; i++) {
+        Serial.printf("[%s] [NVS] Pump %d: enabled=%d auto=%d sched=%d v=%d lm=%lu\n",
+            getLocalTimeStr().c_str(), i + 1,
+            motorConfigs[i].isEnabled, motorConfigs[i].autoMode,
+            motorConfigs[i].scheduleCount, motorConfigs[i].version,
+            motorConfigs[i].lastModified);
+    }
 }
 
 // --- SCHEDULING ---
@@ -333,6 +384,7 @@ String getScanResults() {
 }
 
 void startSetupMode() {
+    setupModeActive = true;
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(SETUP_SSID);
     dnsServer.start(53, "*", WiFi.softAPIP());
@@ -411,6 +463,45 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
 }
 
 void setupApi() {
+    // Live connectivity handshake for the app ("Check Connection" / onResume poll).
+    server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
+        JsonDocument doc;
+        doc["status"] = "ok";
+        doc["ip"] = WiFi.localIP().toString();
+        doc["uptime_sec"] = millis() / 1000;
+        doc["wifi_rssi"] = WiFi.RSSI();
+        doc["epoch"] = getNow();
+        String res;
+        serializeJson(doc, res);
+        request->send(200, "application/json", res);
+    });
+
+    // Full current config with last-modified timestamps, so the app can pull
+    // whatever is newer on the device side (two-way sync).
+    server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
+        JsonDocument doc;
+        JsonArray motors = doc["motors"].to<JsonArray>();
+        for (int i = 0; i < 4; i++) {
+            JsonObject m = motors.add<JsonObject>();
+            m["id"] = i + 1;
+            m["version"] = motorConfigs[i].version;
+            m["last_modified"] = motorConfigs[i].lastModified;
+            m["mode"] = !motorConfigs[i].isEnabled ? "off"
+                       : (motorConfigs[i].autoMode ? "auto" : "scheduled");
+            m["amount_ml"] = motorConfigs[i].amountMl;
+            m["threshold"] = motorConfigs[i].moistureThreshold;
+            JsonArray sched = m["schedules"].to<JsonArray>();
+            for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
+                JsonObject s = sched.add<JsonObject>();
+                s["hour"] = motorConfigs[i].schedules[j].hour;
+                s["minute"] = motorConfigs[i].schedules[j].minute;
+            }
+        }
+        String res;
+        serializeJson(doc, res);
+        request->send(200, "application/json", res);
+    });
+
     server.on("/api/sync", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
       [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         JsonDocument doc;
@@ -433,14 +524,19 @@ void setupApi() {
             if (idx < 0 || idx >= 4) continue;
 
             int newVersion = m["version"];
-            // NOTE: Trusts app's version increment as authoritative, no field-level re-verification.
-            if (newVersion > motorConfigs[idx].version || newVersion == 0) {
+            unsigned long incomingLastModified = m["last_modified"] | 0UL;
+            // Two-way sync rule: apply when the incoming config is newer by
+            // version OR timestamp; otherwise keep the stored (newer) config.
+            // `newVersion == 0` is kept for legacy app configs without versions.
+            if (newVersion > motorConfigs[idx].version || newVersion == 0 ||
+                incomingLastModified > motorConfigs[idx].lastModified) {
                 const char* mode = m["mode"];
                 motorConfigs[idx].isEnabled = (strcmp(mode, "off") != 0);
                 motorConfigs[idx].autoMode = (strcmp(mode, "auto") == 0);
                 motorConfigs[idx].amountMl = m["amount_ml"];
                 motorConfigs[idx].moistureThreshold = m["threshold"];
                 motorConfigs[idx].version = newVersion;
+                motorConfigs[idx].lastModified = incomingLastModified;
 
                 JsonArray schedules = m["schedules"];
                 motorConfigs[idx].scheduleCount = min((int)schedules.size(), 5);
@@ -482,7 +578,7 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 void setup() {
     Serial.begin(115200); delay(500); Serial.printf("\n[%s] [SYSTEM] Booting PlantPilot...\n", getLocalTimeStr().c_str());
-    initRelays(); loadConfigs();
+    initStatusLed(); initRelays(); loadConfigs();
     WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
     WiFi.setSleep(WIFI_PS_MIN_MODEM);
     preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
@@ -499,6 +595,7 @@ void setup() {
 
 void loop() {
     unsigned long nowMs = millis();
+    updateStatusLed();
     if (pendingRestart && nowMs >= restartTime) ESP.restart();
     if (WiFi.status() == WL_CONNECTED) {
         static unsigned long lastNtpSync = 0;

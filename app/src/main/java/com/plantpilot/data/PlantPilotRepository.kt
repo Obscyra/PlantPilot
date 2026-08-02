@@ -95,4 +95,38 @@ class PlantPilotRepository {
             Result.failure(e)
         }
     }
+
+    /**
+     * Live connectivity handshake against the ESP32. Used by the "Check
+     * Connection" button and lifecycle/poll checks — never derive "connected"
+     * from cached state.
+     */
+    suspend fun checkConnection(): Result<StatusResponse> {
+        return try {
+            val response = api.getStatus()
+            val body = response.body()
+            if (response.isSuccessful && body != null && body.status == "ok") {
+                Result.success(body)
+            } else {
+                Result.failure(Exception("Status Error: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Pulls the ESP32's current per-motor config with last-modified timestamps. */
+    suspend fun fetchDeviceConfig(): Result<DeviceConfigResponse> {
+        return try {
+            val response = api.getConfig()
+            val body = response.body()
+            if (response.isSuccessful && body != null) {
+                Result.success(body)
+            } else {
+                Result.failure(Exception("Config Error: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }

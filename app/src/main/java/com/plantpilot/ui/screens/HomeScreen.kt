@@ -29,7 +29,9 @@ fun HomeScreen(
     val settings by viewModel.settings.collectAsState()
     val deviceState by viewModel.deviceState.collectAsState()
     val isConnecting by viewModel.isConnecting.collectAsState()
-    val isConnected = deviceState.isConnected && viewModel.connectionError == null
+    // Live WebSocket state is the single source of truth — never derived from
+    // cached deviceState or a stored placeholder.
+    val isConnected by viewModel.isConnected.collectAsState()
     var isRefreshing by remember { mutableStateOf(value = false) }
     var showWateringSnackbar by remember { mutableStateOf(value = false) }
     var wateringPlantName by remember { mutableStateOf(value = "") }
@@ -133,6 +135,7 @@ fun HomeScreen(
                         PlantCard(
                             plant = plant,
                             use24HourFormat = settings.use24HourFormat,
+                            waterEnabled = isConnected,
                             onWaterNow = {
                                 scope.launch {
                                     wateringPlantName = plant.name

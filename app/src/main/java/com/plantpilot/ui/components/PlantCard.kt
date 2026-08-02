@@ -23,6 +23,7 @@ import com.plantpilot.util.TimeUtils
 fun PlantCard(
     plant: Plant,
     use24HourFormat: Boolean,
+    waterEnabled: Boolean = true,
     onWaterNow: () -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -119,10 +120,11 @@ fun PlantCard(
 
             Button(
                 onClick = onWaterNow,
+                enabled = waterEnabled,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .bounceClick(),
+                    .bounceClick(enabled = waterEnabled),
                 shape = MaterialTheme.shapes.medium
             ) {
                 Icon(
