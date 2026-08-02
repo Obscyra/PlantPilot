@@ -88,10 +88,15 @@ fun PlantDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(16.dp)
         ) {
+            // Scrollable form area — fills remaining space
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
             // Plant name
             OutlinedTextField(
                 value = editableName,
@@ -404,24 +409,20 @@ fun PlantDetailScreen(
                     }
                 }
             }
-
-            // Action buttons
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { showWaterNowDialog = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.medium,
-                    // Requires a live ESP32 connection; grayed out when offline
-                    // instead of clickable-then-failing.
-                    enabled = isConnected
-                ) {
-                    Icon(imageVector = Icons.Default.WaterDrop, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Water Now")
-                }
             }
 
+            // Action buttons — fixed at bottom, never scrolls
             Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = { showWaterNowDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                enabled = isConnected
+            ) {
+                Icon(imageVector = Icons.Default.WaterDrop, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Water Now")
+            }
         }
     }
 
