@@ -61,118 +61,125 @@ fun PumpTestingScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
                 .padding(paddingValues)
-                .padding(top = 8.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(top = 8.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
         ) {
-            // Connection Field
-            OutlinedTextField(
-                value = ipAddress,
-                onValueChange = { ipAddress = it },
-                label = { Text("ESP32 IP / Hostname") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !isConnected && !isConnecting,
-                colors = OutlinedTextFieldDefaults.colors(
-                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                    disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant
-                ),
-                trailingIcon = {
-                    TextButton(
-                        onClick = {
-                            if (isConnected) viewModel.disconnect()
-                            else if (!isConnecting) viewModel.connect(ipAddress)
-                        },
-                        enabled = !isConnecting,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = when {
-                                isConnected -> MaterialTheme.colorScheme.error
-                                isConnecting -> MaterialTheme.colorScheme.onSurfaceVariant
-                                else -> MaterialTheme.colorScheme.primary
-                            }
-                        )
-                    ) {
-                        Text(when {
-                            isConnected -> "Disconnect"
-                            isConnecting -> "Connecting..."
-                            else -> "Connect"
-                        })
-                    }
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = if (isConnected) Icons.Default.SignalWifi4Bar else Icons.Default.WifiOff,
-                        contentDescription = null,
-                        tint = if (isConnected) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
-                    )
-                }
-            )
-
-            // Data activity indicator
-            DataActivityIndicator(isActive = isConnecting || isConnected, isConnecting = isConnecting)
-
-            // Status Section
-            DiagnosticsStatusSection(viewModel)
-
-            // Section Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Scrollable pump controls — fills available space
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    "Pumps",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                // Connection Field
+                OutlinedTextField(
+                    value = ipAddress,
+                    onValueChange = { ipAddress = it },
+                    label = { Text("ESP32 IP / Hostname") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !isConnected && !isConnecting,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                        disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    trailingIcon = {
+                        TextButton(
+                            onClick = {
+                                if (isConnected) viewModel.disconnect()
+                                else if (!isConnecting) viewModel.connect(ipAddress)
+                            },
+                            enabled = !isConnecting,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = when {
+                                    isConnected -> MaterialTheme.colorScheme.error
+                                    isConnecting -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    else -> MaterialTheme.colorScheme.primary
+                                }
+                            )
+                        ) {
+                            Text(when {
+                                isConnected -> "Disconnect"
+                                isConnecting -> "Connecting..."
+                                else -> "Connect"
+                            })
+                        }
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (isConnected) Icons.Default.SignalWifi4Bar else Icons.Default.WifiOff,
+                            contentDescription = null,
+                            tint = if (isConnected) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                        )
+                    }
                 )
-                FilledTonalIconButton(
-                    onClick = { viewModel.refreshStatus() },
-                    enabled = isConnected,
-                    modifier = Modifier.size(34.dp)
+
+                // Data activity indicator
+                DataActivityIndicator(isActive = isConnecting || isConnected, isConnecting = isConnecting)
+
+                // Status Section
+                DiagnosticsStatusSection(viewModel)
+
+                // Section Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
+                    Text(
+                        "Pumps",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    FilledTonalIconButton(
+                        onClick = { viewModel.refreshStatus() },
+                        enabled = isConnected,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
+                    }
                 }
+
+                // Master All Pumps Switch
+                AllPumpsRow(
+                    pumpStates = pumpStates,
+                    enabled = isConnected,
+                    viewModel = viewModel
+                )
+
+                // Pump Controls - Compact Rows
+                PumpRow(
+                    id = 1, icon = Icons.Default.WaterDrop,
+                    isOn = pumpStates[1] ?: false, enabled = isConnected,
+                    rawMoisture = telemetryData?.raw_soil?.getOrNull(0),
+                    viewModel = viewModel
+                )
+                PumpRow(
+                    id = 2, icon = Icons.Default.Spa,
+                    isOn = pumpStates[2] ?: false, enabled = isConnected,
+                    rawMoisture = telemetryData?.raw_soil?.getOrNull(1),
+                    viewModel = viewModel
+                )
+                PumpRow(
+                    id = 3, icon = Icons.Default.Grass,
+                    isOn = pumpStates[3] ?: false, enabled = isConnected,
+                    rawMoisture = telemetryData?.raw_soil?.getOrNull(2),
+                    viewModel = viewModel
+                )
+                PumpRow(
+                    id = 4, icon = Icons.Default.Park,
+                    isOn = pumpStates[4] ?: false, enabled = isConnected,
+                    rawMoisture = telemetryData?.raw_soil?.getOrNull(3),
+                    viewModel = viewModel
+                )
             }
 
-            // Master All Pumps Switch
-            AllPumpsRow(
-                pumpStates = pumpStates,
-                enabled = isConnected,
-                viewModel = viewModel
-            )
-
-            // Pump Controls - Compact Rows
-            PumpRow(
-                id = 1, icon = Icons.Default.WaterDrop,
-                isOn = pumpStates[1] ?: false, enabled = isConnected,
-                rawMoisture = telemetryData?.raw_soil?.getOrNull(0),
-                viewModel = viewModel
-            )
-            PumpRow(
-                id = 2, icon = Icons.Default.Spa,
-                isOn = pumpStates[2] ?: false, enabled = isConnected,
-                rawMoisture = telemetryData?.raw_soil?.getOrNull(1),
-                viewModel = viewModel
-            )
-            PumpRow(
-                id = 3, icon = Icons.Default.Grass,
-                isOn = pumpStates[3] ?: false, enabled = isConnected,
-                rawMoisture = telemetryData?.raw_soil?.getOrNull(2),
-                viewModel = viewModel
-            )
-            PumpRow(
-                id = 4, icon = Icons.Default.Park,
-                isOn = pumpStates[4] ?: false, enabled = isConnected,
-                rawMoisture = telemetryData?.raw_soil?.getOrNull(3),
-                viewModel = viewModel
-            )
-
-            // Command Log
+            // Communication Log — fills remaining space
+            Spacer(modifier = Modifier.height(2.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(top = 2.dp)
@@ -189,7 +196,7 @@ fun PumpTestingScreen(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(400.dp),
+                    .weight(1f),
                 color = Color(0xFF0D1117),
                 shape = RoundedCornerShape(10.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF21262D))
