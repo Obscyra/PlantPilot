@@ -291,7 +291,17 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                         },
                         onNavigateToPumpTest = {
                             navController.navigate(Screen.PumpTest.route)
+                        },
+                        onNavigateToCalibration = {
+                            navController.navigate(Screen.Calibration.route)
                         }
+                    )
+                }
+
+                composable(Screen.Calibration.route) {
+                    CalibrationScreen(
+                        viewModel = viewModel,
+                        onBack = { navController.popBackStack() }
                     )
                 }
 

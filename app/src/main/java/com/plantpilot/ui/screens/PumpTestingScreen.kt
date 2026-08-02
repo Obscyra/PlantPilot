@@ -411,11 +411,16 @@ fun PulsingDot(isVisible: Boolean) {
 
     if (isVisible) {
         Box(
-            modifier = Modifier
-                .size((6 * scale).dp)
-                .clip(CircleShape)
-                .background(Color(0xFF2E7D32).copy(alpha = alpha))
-        )
+            modifier = Modifier.size(8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size((6 * scale).dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF2E7D32).copy(alpha = alpha))
+            )
+        }
     }
 }
 
