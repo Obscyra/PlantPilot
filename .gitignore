@@ -25,3 +25,6 @@ keystore.properties
 # OS files
 .DS_Store
 Thumbs.db
+
+# Releases
+releases/

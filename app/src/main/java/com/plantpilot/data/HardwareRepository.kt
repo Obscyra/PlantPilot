@@ -44,7 +44,7 @@ sealed class HardwareEvent {
     ) : HardwareEvent()
 }
 
-object HardwareRepository {
+class HardwareRepository : HardwareConnection {
     private const val HEARTBEAT_INTERVAL_MS = 5000L
     // Number of consecutive unanswered heartbeat probes before we assume the
     // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
@@ -53,6 +53,10 @@ object HardwareRepository {
     // drops (app backgrounding, network hiccup) are invisible if the link
     // recovers within this window.
     private const val DISCONNECT_DEBOUNCE_MS = 10000L
+    // Watering briefly glitches the link (relay switching shares the power
+    // rail with the ESP32), so tolerate a longer silence while a watering is
+    // in flight rather than flashing "Reconnecting" mid-watering.
+    private const val WATERING_DEBOUNCE_MS = 30000L
 
     // Exponential backoff: base 2s, multiplier 1.7x, cap 30s, ±20% jitter.
     private const val BACKOFF_BASE_MS = 2000L
@@ -97,6 +101,7 @@ object HardwareRepository {
     private var lastHeartbeatSentTime = 0L
     private var missedProbes = 0
     private var consecutiveFailures = 0
+    private var wateringInProgress = false
 
     // Tracks when we last sent a pump command to prevent server "ok" messages
     // (which contain the state of all pumps) from clobbering a newer local
@@ -109,16 +114,16 @@ object HardwareRepository {
     private var requestedCadenceSec = -1
 
     private val _logs = MutableSharedFlow<String>(replay = 50, extraBufferCapacity = 50)
-    val logs: SharedFlow<String> = _logs
+    override val logs: SharedFlow<String> = _logs
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+    override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     private val _telemetry = MutableStateFlow<DeviceStatusResponse?>(null)
-    val telemetry: StateFlow<DeviceStatusResponse?> = _telemetry
+    override val telemetry: StateFlow<DeviceStatusResponse?> = _telemetry
 
     private val _hardwareEvents = MutableSharedFlow<HardwareEvent>(extraBufferCapacity = 10)
-    val hardwareEvents: SharedFlow<HardwareEvent> = _hardwareEvents
+    override val hardwareEvents: SharedFlow<HardwareEvent> = _hardwareEvents
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -128,16 +133,16 @@ object HardwareRepository {
         3 to false,
         4 to false
     ))
-    val pumpStates: StateFlow<Map<Int, Boolean>> = _pumpStates
+    override val pumpStates: StateFlow<Map<Int, Boolean>> = _pumpStates
 
     /** True when a live WebSocket is open (Connected or mid-reconnect). */
-    fun isConnected(): Boolean {
+    override fun isConnected(): Boolean {
         val s = _connectionState.value
         return s == ConnectionState.Connected || s == ConnectionState.Reconnecting ||
             s == ConnectionState.Connecting
     }
 
-    fun connect(url: String) {
+    override fun connect(url: String) {
         if (url == currentUrl && _connectionState.value == ConnectionState.Connected) return
         currentUrl = url
         userInitiatedDisconnect = false
@@ -218,7 +223,10 @@ object HardwareRepository {
         addLog(message)
         if (disconnectDebounceJob?.isActive == true) return
         disconnectDebounceJob = scope.launch {
-            delay(DISCONNECT_DEBOUNCE_MS)
+            // A watering in flight gets extra grace before we declare a lost
+            // link, so relay-induced glitches don't flash "Reconnecting".
+            val debounceMs = if (wateringInProgress) WATERING_DEBOUNCE_MS else DISCONNECT_DEBOUNCE_MS
+            delay(debounceMs)
             _telemetry.value = null
             resetPumpStates()
             if (userInitiatedDisconnect) {
@@ -294,7 +302,7 @@ object HardwareRepository {
         heartbeatJob = null
     }
 
-    fun disconnect() {
+    override fun disconnect() {
         userInitiatedDisconnect = true
         consecutiveFailures = 0
         cancelReconnect()
@@ -309,7 +317,7 @@ object HardwareRepository {
         addLog("System: Disconnected")
     }
 
-    fun sendCommand(command: String) {
+    override fun sendCommand(command: String) {
         // Optimistic UI: Update local pump states immediately when a pump command
         // is sent, so the switches feel responsive.
         when {
@@ -370,12 +378,16 @@ object HardwareRepository {
      * Tells the ESP32 how fast to stream telemetry (seconds between pushes).
      * Foreground = 1s, background = 3s. Queued if the socket isn't open yet.
      */
-    fun setStreamCadence(seconds: Int) {
+    override fun setStreamCadence(seconds: Int) {
         requestedCadenceSec = seconds
         val cmd = "SYNC_MODE $seconds"
         if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
             sendCommand(cmd)
         }
+    }
+
+    override fun setWateringInProgress(active: Boolean) {
+        wateringInProgress = active
     }
 
     private fun addLog(message: String) {

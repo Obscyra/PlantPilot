@@ -27,7 +27,6 @@ import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.*
 import androidx.navigation.navArgument
-import com.plantpilot.data.HardwareRepository
 import com.plantpilot.navigation.Screen
 import com.plantpilot.navigation.bottomNavItems
 import com.plantpilot.ui.components.DeviceConnectionDialog
@@ -38,6 +37,7 @@ import com.plantpilot.viewmodel.PumpTestViewModel
 
 class MainActivity : ComponentActivity() {
     private val viewModel: PlantPilotViewModel by viewModels()
+    private val hardwareConnection get() = (application as PlantPilotApp).hardwareConnection
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     startForegroundService(Intent(this, SyncService::class.java))
-                    HardwareRepository.setStreamCadence(viewModel.settings.value.sensorCadenceSec)
+                    hardwareConnection.setStreamCadence(viewModel.settings.value.sensorCadenceSec)
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     // Re-check the ESP32 connection every time the app returns to
@@ -78,7 +78,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.onAppResumed()
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    HardwareRepository.setStreamCadence(BACKGROUND_CADENCE_SEC)
+                    hardwareConnection.setStreamCadence(BACKGROUND_CADENCE_SEC)
                 }
                 else -> {}
             }

@@ -33,8 +33,8 @@ fun PlantDetailScreen(
     val plants by viewModel.plants.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
-    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
-    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val canSendCommands = com.plantpilot.data.ConnectionStateHelper.canSendCommands(connectionState)
+    val canDisplayLastKnownData = com.plantpilot.data.ConnectionStateHelper.canDisplayLastKnownData(connectionState)
     val plant = plants.find { it.id == plantId }
 
     if (plant == null) {

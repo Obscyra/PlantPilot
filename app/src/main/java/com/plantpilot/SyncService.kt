@@ -12,7 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import com.plantpilot.data.HardwareRepository
+import com.plantpilot.data.HardwareConnection
 import com.plantpilot.data.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,16 +21,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * Foreground service that keeps the process alive so the singleton
- * [HardwareRepository] WebSocket keeps streaming telemetry from the ESP32 while
+ * Foreground service that keeps the process alive so the
+ * [HardwareConnection] WebSocket keeps streaming telemetry from the ESP32 while
  * the app is backgrounded (at the 3s cadence). Started from MainActivity's
  * ON_START (always permitted while the app is foreground) and stopped when the
  * app is fully closed (onTaskRemoved). The service does not own the socket — it
- * only keeps the process (and therefore the socket) running; [HardwareRepository]
- * is a static singleton that outlives both the activity and this service. If the
- * OS kills the process while backgrounded, START_STICKY restarts this service,
- * which then re-establishes the WebSocket itself so the connection survives
- * without the user reopening the app.
+ * only keeps the process (and therefore the socket) running; [HardwareConnection]
+ * is owned by [PlantPilotApp] and outlives both the activity and this service.
+ * If the OS kills the process while backgrounded, START_STICKY restarts this
+ * service, which then re-establishes the WebSocket itself so the connection
+ * survives without the user reopening the app.
  */
 class SyncService : Service() {
 
@@ -41,6 +41,8 @@ class SyncService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
+    private val hardwareConnection: HardwareConnection
+        get() = (applicationContext as PlantPilotApp).hardwareConnection
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,11 +61,11 @@ class SyncService : Service() {
     }
 
     private suspend fun reconnectIfNeeded() {
-        if (HardwareRepository.isConnected()) return
+        if (hardwareConnection.isConnected()) return
         val prefs = SettingsManager(this).deviceStateFlow.first()
         if (prefs.ip.isBlank()) return
         val url = if (prefs.ip.startsWith("ws://")) prefs.ip else "ws://${prefs.ip}/ws"
-        HardwareRepository.connect(url)
+        hardwareConnection.connect(url)
     }
 
     private fun acquireWakeLock() {
@@ -130,7 +132,7 @@ class SyncService : Service() {
         super.onTaskRemoved(rootIntent)
         // App fully closed (swiped from recents): stop background sync and cut
         // the WebSocket so the ESP32 drops to its idle no-client cadence.
-        HardwareRepository.disconnect()
+        hardwareConnection.disconnect()
         releaseWakeLock()
         stopSelf()
     }
