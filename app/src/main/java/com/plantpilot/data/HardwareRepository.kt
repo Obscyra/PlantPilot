@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.*
 import okhttp3.*
@@ -48,6 +49,21 @@ object HardwareRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var webSocket: WebSocket? = null
+    
+    // Command queue to prevent flooding the ESP32
+    private val commandChannel = Channel<String>(Channel.BUFFERED)
+
+    init {
+        scope.launch {
+            for (command in commandChannel) {
+                // Physical gap between commands (60ms) to prevent buffer overflow on ESP32
+                // and give the network stack room to breathe.
+                sendPhysicalCommand(command)
+                delay(60)
+            }
+        }
+    }
+
     private var currentUrl: String? = null
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
@@ -55,6 +71,11 @@ object HardwareRepository {
     private var lastMessageTime = 0L
     private var lastHeartbeatSentTime = 0L
     private var missedProbes = 0
+
+    // Tracks when we last sent a pump command to prevent server "ok" messages
+    // (which contain the state of all pumps) from clobbering a newer local
+    // optimistic toggle before it reaches the ESP32.
+    private val lastPumpCommandTime = mutableMapOf<Int, Long>()
 
     // Telemetry cadence the ESP32 should stream at while we're connected.
     // Applied immediately when the socket is up, otherwise queued and sent on
@@ -229,13 +250,60 @@ object HardwareRepository {
     }
 
     fun sendCommand(command: String) {
+        // Optimistic UI: Update local pump states immediately when a pump command
+        // is sent, so the switches feel responsive.
+        when {
+            command == "PUMP_ALL_ON" -> {
+                val now = System.currentTimeMillis()
+                (1..4).forEach { lastPumpCommandTime[it] = now }
+                updateAllPumpStates(true)
+            }
+            command == "PUMP_ALL_OFF" -> {
+                val now = System.currentTimeMillis()
+                (1..4).forEach { lastPumpCommandTime[it] = now }
+                updateAllPumpStates(false)
+            }
+            command.startsWith("PUMP") -> {
+                val parts = command.split("_")
+                if (parts.size == 2) {
+                    val pumpLetter = parts[0].removePrefix("PUMP")
+                    val pumpNum = when (pumpLetter) {
+                        "1", "A" -> 1; "2", "B" -> 2; "3", "C" -> 3; "4", "D" -> 4
+                        else -> null
+                    }
+                    val state = parts[1] == "ON"
+                    if (pumpNum != null) {
+                        lastPumpCommandTime[pumpNum] = System.currentTimeMillis()
+                        updatePumpState(pumpNum, state)
+                    }
+                }
+            }
+        }
+        
+        // Enqueue for staggered transmission
+        scope.launch { commandChannel.send(command) }
+    }
+
+    private fun sendPhysicalCommand(command: String) {
         addLog("App: Sent $command")
         try {
             webSocket?.send(command)
         } catch (e: Exception) {
-            // Socket may already be closed/aborted (e.g. during heartbeat probe)
             addLog("Error: ${e.message}")
         }
+    }
+
+    fun updatePumpState(pumpId: Int, isOn: Boolean) {
+        if (_pumpStates.value[pumpId] == isOn) return
+        val newStates = _pumpStates.value.toMutableMap()
+        newStates[pumpId] = isOn
+        _pumpStates.value = newStates
+    }
+
+    fun updateAllPumpStates(isOn: Boolean) {
+        val allMatches = _pumpStates.value.values.all { it == isOn }
+        if (allMatches) return
+        _pumpStates.value = mapOf(1 to isOn, 2 to isOn, 3 to isOn, 4 to isOn)
     }
 
     /**
@@ -255,6 +323,7 @@ object HardwareRepository {
     }
 
     private fun resetPumpStates() {
+        lastPumpCommandTime.clear()
         _pumpStates.value = mapOf(1 to false, 2 to false, 3 to false, 4 to false)
     }
 
@@ -276,12 +345,20 @@ object HardwareRepository {
                     // OK responses and STATUS replies instead.
                 } else if (type == "ok") {
                     // Command acknowledgment with actual pump states from firmware.
-                    // Array is 0-indexed (index 0 = Pump 1), map keys are 1-indexed.
+                    // Only update the local state if we haven't sent a command
+                    // recently, otherwise the optimistic toggle wins until the
+                    // server "catches up".
                     element.jsonObject["pumps"]?.jsonArray?.let { arr ->
                         val newStates = _pumpStates.value.toMutableMap()
+                        val now = System.currentTimeMillis()
                         arr.forEachIndexed { index, elem ->
                             val pumpId = index + 1
-                            if (pumpId in 1..4) newStates[pumpId] = elem.jsonPrimitive.boolean
+                            if (pumpId in 1..4) {
+                                val lastSent = lastPumpCommandTime[pumpId] ?: 0L
+                                if (now - lastSent > 1200L) { // 1.2s grace period
+                                    newStates[pumpId] = elem.jsonPrimitive.boolean
+                                }
+                            }
                         }
                         _pumpStates.value = newStates
                     }
@@ -300,21 +377,28 @@ object HardwareRepository {
         } else if (text.startsWith("Pump")) {
             val lines = text.split("\n")
             val newStates = _pumpStates.value.toMutableMap()
+            val now = System.currentTimeMillis()
             lines.forEach { line ->
                 val parts = line.split(": ")
                 if (parts.size == 2) {
                     val pumpNum = parts[0].removePrefix("Pump").toIntOrNull()
                     val state = parts[1] == "ON"
-                    if (pumpNum != null) {
-                        newStates[pumpNum] = state
+                    if (pumpNum != null && pumpNum in 1..4) {
+                        val lastSent = lastPumpCommandTime[pumpNum] ?: 0L
+                        if (now - lastSent > 1200L) {
+                            newStates[pumpNum] = state
+                        }
                     }
                 }
             }
             _pumpStates.value = newStates
         } else if (text.startsWith("OK: PUMP")) {
+            val now = System.currentTimeMillis()
             if (text == "OK: PUMP_ALL_ON") {
+                (1..4).forEach { lastPumpCommandTime[it] = 0L } // Clear so it applies
                 _pumpStates.value = mapOf(1 to true, 2 to true, 3 to true, 4 to true)
             } else if (text == "OK: PUMP_ALL_OFF") {
+                (1..4).forEach { lastPumpCommandTime[it] = 0L }
                 _pumpStates.value = mapOf(1 to false, 2 to false, 3 to false, 4 to false)
             } else {
                 val parts = text.split("_")
@@ -326,9 +410,12 @@ object HardwareRepository {
                     }
                     val state = parts[1] == "ON"
                     if (pumpNum != null) {
-                        val newStates = _pumpStates.value.toMutableMap()
-                        newStates[pumpNum] = state
-                        _pumpStates.value = newStates
+                        val lastSent = lastPumpCommandTime[pumpNum] ?: 0L
+                        if (now - lastSent > 1200L) {
+                            val newStates = _pumpStates.value.toMutableMap()
+                            newStates[pumpNum] = state
+                            _pumpStates.value = newStates
+                        }
                     }
                 }
             }

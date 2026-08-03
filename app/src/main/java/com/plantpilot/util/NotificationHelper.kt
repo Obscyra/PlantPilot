@@ -48,7 +48,7 @@ class NotificationHelper(private val context: Context) {
 
     fun showLowWaterAlert() {
         val builder = NotificationCompat.Builder(context, CHANNEL_LOW_WATER_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat) // Replace with app icon later
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Water Tank Low")
             .setContentText("Please refill the water tank.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -60,7 +60,7 @@ class NotificationHelper(private val context: Context) {
 
     fun showWateringStarted(plantName: String) {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat) // Replace with app icon later
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Watering Started")
             .setContentText("Now watering $plantName...")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -72,7 +72,7 @@ class NotificationHelper(private val context: Context) {
 
     fun showWateringFinished(plantName: String) {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat) // Replace with app icon later
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Watering Finished")
             .setContentText("$plantName has been watered successfully.")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)

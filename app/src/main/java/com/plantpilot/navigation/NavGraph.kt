@@ -15,6 +15,7 @@ sealed class Screen(val route: String) {
     data object Onboarding : Screen("onboarding")
     data object PumpTest : Screen("pump_test")
     data object Calibration : Screen("calibration")
+    data object SerialOutput : Screen("serial_output")
 }
 
 data class BottomNavItem(

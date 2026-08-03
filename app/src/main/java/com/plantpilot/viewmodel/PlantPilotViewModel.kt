@@ -25,6 +25,7 @@ import com.plantpilot.data.SettingsManager
 import com.plantpilot.network.DeviceConfigResponse
 import com.plantpilot.network.DeviceMotorConfig
 import com.plantpilot.network.DeviceStatusResponse
+import com.plantpilot.network.DeviceWateringEvent
 import com.plantpilot.network.MotorConfig
 import com.plantpilot.network.SyncRequest
 import com.plantpilot.util.NotificationHelper
@@ -187,6 +188,13 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                             moistureAfter = event.soil_after
                         )
                         addHistoryEvent(newEvent)
+                        
+                        // Update the plant's last watered timestamp in the UI
+                        _plants.value = _plants.value.map { p ->
+                            if (p.id == plant.id) {
+                                p.copy(lastWateredTimestamp = newEvent.timestamp)
+                            } else p
+                        }
                     }
                 }
             }
@@ -327,6 +335,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     waterAmountMl = dev.amount_ml,
                     moistureThreshold = dev.threshold ?: it.moistureThreshold,
                     minIntervalHours = dev.min_interval_hours ?: it.minIntervalHours,
+                    lastWateredTimestamp = dev.last_watered?.let { s -> s * 1000 } ?: it.lastWateredTimestamp,
                     schedules = dev.schedules.map {
                         WateringSchedule(
                             id = UUID.randomUUID().toString(),
@@ -341,6 +350,38 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             } else it
         }
         return true
+    }
+
+    private fun processOfflineEvent(event: DeviceWateringEvent) {
+        val plant = _plants.value.find { it.motorNumber == event.motor } ?: return
+        val timestamp = event.epoch * 1000L
+        
+        // Check if we already have this event in history (simple deduplication by timestamp/motor)
+        if (_history.value.any { it.motorNumber == event.motor && it.timestamp == timestamp }) return
+
+        val newEvent = WateringEvent(
+            id = UUID.randomUUID().toString(),
+            plantId = plant.id,
+            plantName = plant.name,
+            motorNumber = plant.motorNumber,
+            amountMl = event.amount_ml,
+            triggerType = when (event.trigger) {
+                "scheduled" -> TriggerType.SCHEDULED
+                "auto" -> TriggerType.AUTOMATIC
+                else -> TriggerType.MANUAL
+            },
+            timestamp = timestamp,
+            moistureBefore = null,
+            moistureAfter = event.soil_after
+        )
+        addHistoryEvent(newEvent)
+        
+        // Update the plant's UI state if this is the newest watering we've seen
+        if (timestamp > plant.lastWateredTimestamp) {
+            _plants.value = _plants.value.map { p ->
+                if (p.id == plant.id) p.copy(lastWateredTimestamp = timestamp) else p
+            }
+        }
     }
 
     /**
@@ -504,6 +545,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     amount_ml = plant.waterAmountMl,
                     threshold = plant.moistureThreshold,
                     min_interval_hours = plant.minIntervalHours,
+                    last_watered = plant.lastWateredTimestamp / 1000,
                     version = plant.configVersion,
                     last_modified = plant.lastUpdated / 1000,
                     schedules = plant.schedules
@@ -519,6 +561,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
             if (result.isSuccess) {
                 isConfigDirty = false
+                
+                // Process any missed history events from the device
+                result.getOrNull()?.history?.forEach { devEvent ->
+                    processOfflineEvent(devEvent)
+                }
             }
 
             if (!silent) {
@@ -635,6 +682,29 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             )
         }
         markConfigDirty(autoSync = true)
+    }
+
+    fun resetDeviceConfig(onComplete: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            // 1. Wipe ESP32 NVS config data via WebSocket command
+            hardwareRepository.sendCommand("RESET_CONFIG")
+
+            // 2. Small delay to let the ESP32 finish NVS clear and reload defaults
+            delay(800)
+
+            // 3. Force push the latest app data to the "wiped" device.
+            // We bump timestamps so the app's config is guaranteed to be "newer"
+            // than the device defaults (which will have last_modified = 0).
+            _plants.value = _plants.value.map {
+                it.copy(
+                    lastUpdated = System.currentTimeMillis()
+                )
+            }
+
+            // Perform a full force sync
+            syncConfigWithDevice(silent = false, force = true)
+            onComplete(true)
+        }
     }
 
     fun toggleDeviceConnection() {

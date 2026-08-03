@@ -1,8 +1,21 @@
 package com.plantpilot.ui.screens
 
-import androidx.compose.foundation.BorderStroke
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +37,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.plantpilot.viewmodel.PlantPilotViewModel
+import com.plantpilot.ui.components.ConnectionStatusChip
+import com.plantpilot.ui.components.PulsingDot
+import com.plantpilot.ui.theme.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -75,9 +91,48 @@ fun CalibrationScreen(
     }
 
     var selectedSensor by remember { mutableIntStateOf(1) }
-    val initial = existingCalibration[selectedSensor]
-    var dryValue by remember(selectedSensor) { mutableIntStateOf(initial?.first ?: 4095) }
-    var wetValue by remember(selectedSensor) { mutableIntStateOf(initial?.second ?: 1400) }
+
+    // Draft map: temporary dry/wet edits per sensor, keyed by sensor index (1–4).
+    val draftCalibration = remember { mutableStateMapOf<Int, Pair<Int, Int>>() }
+
+    var dryValue by remember(selectedSensor) {
+        mutableIntStateOf(
+            draftCalibration[selectedSensor]?.first
+                ?: existingCalibration[selectedSensor]?.first
+                ?: 4095
+        )
+    }
+    var wetValue by remember(selectedSensor) {
+        mutableIntStateOf(
+            draftCalibration[selectedSensor]?.second
+                ?: existingCalibration[selectedSensor]?.second
+                ?: 1400
+        )
+    }
+
+    fun saveDraftForCurrentSensor() {
+        draftCalibration[selectedSensor] = dryValue to wetValue
+    }
+
+    val hasUnsavedChanges by remember {
+        derivedStateOf {
+            draftCalibration.any { (sensor, pair) ->
+                val saved = existingCalibration[sensor]
+                saved?.first != pair.first || saved?.second != pair.second
+            }
+        }
+    }
+
+    var showSaveDialog by remember { mutableStateOf(false) }
+
+    // Back-press guard: prompt to save if unsaved changes exist.
+    BackHandler {
+        if (hasUnsavedChanges) {
+            showSaveDialog = true
+        } else {
+            onBack()
+        }
+    }
 
     // Live raw ADC reading for the selected sensor (raw_soil, sensor index + 1).
     val liveReading = telemetry?.raw_soil?.getOrNull(selectedSensor - 1)
@@ -97,9 +152,18 @@ fun CalibrationScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        if (hasUnsavedChanges) showSaveDialog = true else onBack()
+                    }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    ConnectionStatusChip(
+                        isConnected = isConnected,
+                        onClick = {}
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 }
             )
         }
@@ -108,7 +172,7 @@ fun CalibrationScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(horizontal = 20.dp, vertical = 16.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
         ) {
             // Status header
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -118,7 +182,7 @@ fun CalibrationScreen(
                     text = if (isConnected) "Live Reading" else "Device Offline",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (isConnected) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                    color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
@@ -135,8 +199,9 @@ fun CalibrationScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
+                    .animateContentSize()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF0F1115))
+                    .background(TerminalBackground)
                     .verticalScroll(state = terminalScroll)
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
@@ -145,7 +210,7 @@ fun CalibrationScreen(
                         text = if (isConnected) "Waiting for telemetry..." else "Device offline",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        color = Color(0xFF666A70)
+                        color = TerminalPlaceholder
                     )
                 } else {
                     terminalLines.forEach { line ->
@@ -154,7 +219,7 @@ fun CalibrationScreen(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
                             lineHeight = 18.sp,
-                            color = Color(0xFF9EFFB0)
+                            color = TerminalGreen
                         )
                     }
                 }
@@ -168,17 +233,36 @@ fun CalibrationScreen(
                     SegmentedButton(
                         selected = selectedSensor == sensor,
                         onClick = {
+                            saveDraftForCurrentSensor()
                             selectedSensor = sensor
-                            val cal = existingCalibration[sensor]
-                            dryValue = cal?.first ?: 4095
-                            wetValue = cal?.second ?: 1400
+                            dryValue = draftCalibration[sensor]?.first
+                                ?: existingCalibration[sensor]?.first
+                                ?: 4095
+                            wetValue = draftCalibration[sensor]?.second
+                                ?: existingCalibration[sensor]?.second
+                                ?: 1400
                         },
                         shape = SegmentedButtonDefaults.itemShape(
                             index = sensor - 1,
                             count = 4
                         )
                     ) {
-                        Text("Sensor $sensor")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val hasDraft = draftCalibration[sensor]?.let { draft ->
+                                val saved = existingCalibration[sensor]
+                                saved?.first != draft.first || saved?.second != draft.second
+                            } ?: false
+                            if (hasDraft) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.error)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                            }
+                            Text("Sensor $sensor")
+                        }
                     }
                 }
             }
@@ -188,9 +272,8 @@ fun CalibrationScreen(
             // Live reading card for the selected sensor — fixed height so the
             // big number / placeholder never shifts the surrounding layout.
             Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                shape = MaterialTheme.shapes.large,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(120.dp)
@@ -245,7 +328,7 @@ fun CalibrationScreen(
                     text = if (liveReading != null && dryValue > wetValue) "${(percent * 100).toInt()}%" else "--",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (percent > 0.3f) Color(0xFF2E7D32) else Color(0xFFFBC02D)
+                    color = if (percent > 0.3f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -262,7 +345,12 @@ fun CalibrationScreen(
             // Map buttons — Dry left, Wet right (mirrors the value boxes below)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    onClick = { liveReading?.let { dryValue = it } },
+                    onClick = {
+                        liveReading?.let {
+                            dryValue = it
+                            saveDraftForCurrentSensor()
+                        }
+                    },
                     enabled = liveReading != null,
                     modifier = Modifier.weight(1f)
                 ) {
@@ -271,7 +359,12 @@ fun CalibrationScreen(
                     Text("Set as Dry")
                 }
                 OutlinedButton(
-                    onClick = { liveReading?.let { wetValue = it } },
+                    onClick = {
+                        liveReading?.let {
+                            wetValue = it
+                            saveDraftForCurrentSensor()
+                        }
+                    },
                     enabled = liveReading != null,
                     modifier = Modifier.weight(1f)
                 ) {
@@ -297,49 +390,116 @@ fun CalibrationScreen(
                 CalibrationValueField(
                     label = "Dry Value",
                     value = dryValue,
-                    onValueChange = { dryValue = it },
+                    onValueChange = {
+                        dryValue = it
+                        saveDraftForCurrentSensor()
+                    },
                     modifier = Modifier.weight(1f)
                 )
                 CalibrationValueField(
                     label = "Wet Value",
                     value = wetValue,
-                    onValueChange = { wetValue = it },
+                    onValueChange = {
+                        wetValue = it
+                        saveDraftForCurrentSensor()
+                    },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onBack) {
+                TextButton(onClick = {
+                    if (hasUnsavedChanges) showSaveDialog = true else onBack()
+                }) {
                     Text("Cancel")
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Button(
                     onClick = {
-                        viewModel.calibrateSensor(selectedSensor, dryValue, wetValue) { success ->
-                            scope.launch {
-                                snackbarHostState.showSnackbar(
-                                    message = if (success) {
-                                        "Sensor $selectedSensor calibrated (Dry: $dryValue, Wet: $wetValue)"
-                                    } else {
-                                        "Calibration failed — device unreachable"
-                                    },
-                                    duration = SnackbarDuration.Long
-                                )
+                        saveDraftForCurrentSensor()
+                        val toSave = draftCalibration.toMap()
+                        var allSuccess = true
+                        var remaining = toSave.size
+                        toSave.forEach { (sensor, pair) ->
+                            viewModel.calibrateSensor(sensor, pair.first, pair.second) { success ->
+                                if (!success) allSuccess = false
+                                remaining--
+                                if (remaining == 0) {
+                                    scope.launch {
+                                        if (allSuccess) {
+                                            draftCalibration.clear()
+                                        }
+                                        snackbarHostState.showSnackbar(
+                                            message = if (allSuccess) {
+                                                "All sensors calibrated"
+                                            } else {
+                                                "Some calibrations failed — device unreachable"
+                                            },
+                                            duration = SnackbarDuration.Long
+                                        )
+                                    }
+                                }
                             }
                         }
                     },
-                    enabled = dryValue > wetValue && isConnected
+                    enabled = hasUnsavedChanges && isConnected
                 ) {
                     Text("Save Calibration")
                 }
             }
         }
+    }
+
+    // Save-confirm dialog
+    if (showSaveDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveDialog = false },
+            title = { Text("Unsaved Calibration") },
+            text = { Text("You have unsaved calibration data. Save to device before leaving?") },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            confirmButton = {
+                TextButton(onClick = {
+                    showSaveDialog = false
+                    saveDraftForCurrentSensor()
+                    val toSave = draftCalibration.toMap()
+                    var allSuccess = true
+                    var remaining = toSave.size
+                    toSave.forEach { (sensor, pair) ->
+                        viewModel.calibrateSensor(sensor, pair.first, pair.second) { success ->
+                            if (!success) allSuccess = false
+                            remaining--
+                            if (remaining == 0) {
+                                scope.launch {
+                                    if (allSuccess) draftCalibration.clear()
+                                    snackbarHostState.showSnackbar(
+                                        message = if (allSuccess) "All sensors calibrated" else "Some calibrations failed",
+                                        duration = SnackbarDuration.Long
+                                    )
+                                }
+                                onBack()
+                            }
+                        }
+                    }
+                }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showSaveDialog = false
+                    draftCalibration.clear()
+                    onBack()
+                }) {
+                    Text("Discard")
+                }
+            }
+        )
     }
 }
 
@@ -371,12 +531,7 @@ private fun CalibrationScale(
                     .clip(RoundedCornerShape(trackHeight / 2))
                     .background(
                         Brush.horizontalGradient(
-                            listOf(
-                                Color(0xFF2196F3),
-                                Color(0xFF66BB6A),
-                                Color(0xFFEF9A2C),
-                                Color(0xFF8D6E63)
-                            )
+                            listOf(CalScaleWet, CalScaleMid, CalScaleDry, CalScaleEdge)
                         )
                     )
             )
@@ -387,9 +542,9 @@ private fun CalibrationScale(
                 trackWidth = trackWidth,
                 markerSize = markerSize,
                 trackHeight = trackHeight,
-                color = Color(0xFF2196F3),
+                color = CalScaleWet,
                 label = "Wet",
-                labelColor = Color(0xFF2196F3)
+                labelColor = CalScaleWet
             )
             // Dry marker
             Marker(
@@ -397,9 +552,9 @@ private fun CalibrationScale(
                 trackWidth = trackWidth,
                 markerSize = markerSize,
                 trackHeight = trackHeight,
-                color = Color(0xFF8D6E63),
+                color = CalScaleEdge,
                 label = "Dry",
-                labelColor = Color(0xFF8D6E63)
+                labelColor = CalScaleEdge
             )
             // Live reading needle
             Box(
@@ -410,7 +565,7 @@ private fun CalibrationScale(
                     )
                     .size(width = 3.dp, height = trackHeight + 8.dp)
                     .clip(RoundedCornerShape(1.dp))
-                    .background(Color(0xFFFFFFFF))
+                    .background(CalNeedle)
             )
         }
         Spacer(modifier = Modifier.height(2.dp))

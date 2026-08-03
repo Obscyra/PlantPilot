@@ -54,3 +54,26 @@ val SurfaceLight = Color(0xFFFAFDF7)
 val SurfaceVariantLight = Color(0xFFE0E4D8)
 val OnSurfaceLight = Color(0xFF1A1C19)
 val OnSurfaceVariantLight = Color(0xFF44483E)
+
+// Terminal / log view colors
+val TerminalBackground = Color(0xFF0D1117)
+val TerminalBorder = Color(0xFF21262D)
+val TerminalText = Color(0xFFC9D1D9)
+val TerminalPlaceholder = Color(0xFF666A70)
+val TerminalGreen = Color(0xFF9EFFB0)
+val LogError = Color(0xFFFF6B6B)
+val LogSuccess = Color(0xFF7EE787)
+val LogInfo = Color(0xFF79C0FF)
+val LogMuted = Color(0xFF8B949E)
+
+// RSSI signal quality
+val RssiGood = Color(0xFF66BB6A)
+val RssiMedium = Color(0xFFFBC02D)
+val RssiBad = Color(0xFFD32F2F)
+
+// Calibration scale
+val CalScaleWet = Color(0xFF2196F3)
+val CalScaleMid = Color(0xFF66BB6A)
+val CalScaleDry = Color(0xFFEF9A2C)
+val CalScaleEdge = Color(0xFF8D6E63)
+val CalNeedle = Color(0xFFFFFFFF)

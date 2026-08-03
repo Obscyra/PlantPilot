@@ -23,6 +23,10 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
     private val _initialIp = MutableStateFlow("plantpilot.local")
     val initialIp: StateFlow<String> = _initialIp.asStateFlow()
 
+    // Rate-limit local toggles to prevent double-taps/jitter from flooding the repo
+    private val lastToggleTime = mutableMapOf<Int, Long>()
+    private var lastAllToggleTime = 0L
+
     init {
         viewModelScope.launch {
             repository.logs.collect { log ->
@@ -65,12 +69,21 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun togglePump(pumpId: Int, turnOn: Boolean) {
+        val now = System.currentTimeMillis()
+        val lastTime = lastToggleTime[pumpId] ?: 0L
+        if (now - lastTime < 120) return // Ignore rapid accidental double-taps
+        lastToggleTime[pumpId] = now
+
         val letter = when (pumpId) { 1 -> "A"; 2 -> "B"; 3 -> "C"; 4 -> "D"; else -> "$pumpId" }
         val cmd = "PUMP${letter}_${if (turnOn) "ON" else "OFF"}"
         repository.sendCommand(cmd)
     }
 
     fun turnAllPumps(turnOn: Boolean) {
+        val now = System.currentTimeMillis()
+        if (now - lastAllToggleTime < 400) return // Higher debounce for "All" commands
+        lastAllToggleTime = now
+
         val cmd = "PUMP_ALL_${if (turnOn) "ON" else "OFF"}"
         repository.sendCommand(cmd)
     }
