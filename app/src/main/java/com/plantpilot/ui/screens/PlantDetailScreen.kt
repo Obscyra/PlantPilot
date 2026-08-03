@@ -403,34 +403,57 @@ fun PlantDetailScreen(
                                 steps = 10,
                                 modifier = Modifier.fillMaxWidth()
                             )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Max runtime
-                            Text(
-                                text = "Max runtime: ${editableMaxRuntime.toInt()} min",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Slider(
-                                value = editableMaxRuntime,
-                                onValueChange = {
-                                    editableMaxRuntime = it
-                                    viewModel.updateMaxRuntime(plantId, it.toInt())
-                                },
-                                valueRange = 0f..10f,
-                                steps = 9,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Text(
-                                text = "0 = no limit",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
                         }
                         WateringMode.OFF -> {
                             // No additional settings for OFF mode
                         }
+                    }
+                }
+            }
+
+            // Max runtime (universal — applies to all modes)
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Max Motor Runtime",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Failsafe: motor stops after this duration to prevent flooding",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (editableMaxRuntime.toInt() == 0) "No limit" else "${editableMaxRuntime.toInt()} min",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Slider(
+                        value = editableMaxRuntime,
+                        onValueChange = {
+                            editableMaxRuntime = it
+                            viewModel.updateMaxRuntime(plantId, it.toInt())
+                        },
+                        valueRange = 0f..10f,
+                        steps = 9,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Off", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("10 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
