@@ -12,6 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.plantpilot.model.*
+import java.util.Calendar
 import java.util.Locale
 import java.util.UUID
 
@@ -24,9 +25,10 @@ fun ScheduleBottomSheet(
     onSave: (WateringSchedule) -> Unit,
     onDelete: ((WateringSchedule) -> Unit)? = null
 ) {
+    val now = remember { Calendar.getInstance() }
     val timePickerState = rememberTimePickerState(
-        initialHour = existingSchedule?.hour ?: 8,
-        initialMinute = existingSchedule?.minute ?: 0,
+        initialHour = existingSchedule?.hour ?: now.get(Calendar.HOUR_OF_DAY),
+        initialMinute = existingSchedule?.minute ?: now.get(Calendar.MINUTE),
         is24Hour = use24HourFormat
     )
 

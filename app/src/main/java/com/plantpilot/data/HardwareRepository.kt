@@ -71,9 +71,6 @@ class HardwareRepository : HardwareConnection {
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
-        // App-side WebSocket keepalive: sends a control ping and expects a pong,
-        // so NAT/firewall timeouts can't silently drop an idle-but-alive socket.
-        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -86,8 +83,10 @@ class HardwareRepository : HardwareConnection {
     init {
         scope.launch {
             for (command in commandChannel) {
-                // Physical gap between commands (60ms) to prevent buffer overflow on ESP32
-                // and give the network stack room to breathe.
+                // If the socket is null (disconnected), drop the command.
+                // The optimistic UI update has already been applied and the
+                // next STATUS reply will correct the state.
+                if (webSocket == null) continue
                 sendPhysicalCommand(command)
                 delay(60)
             }
@@ -221,26 +220,31 @@ class HardwareRepository : HardwareConnection {
     }
 
     private fun onConnectionLost(message: String) {
-        stopHeartbeat()
+        // During a watering grace window, keep the heartbeat alive so its
+        // STATUS probes can detect a quick recovery (relay-induced WiFi blip).
+        if (!wateringInProgress) stopHeartbeat()
         addLog(message)
         if (disconnectDebounceJob?.isActive == true) return
         disconnectDebounceJob = scope.launch {
-            // A watering in flight gets extra grace before we declare a lost
-            // link, so relay-induced glitches don't flash "Reconnecting".
             val debounceMs = if (wateringInProgress) WATERING_DEBOUNCE_MS else DISCONNECT_DEBOUNCE_MS
             delay(debounceMs)
+            // Liveness check: if the link recovered during the grace window
+            // (e.g. we received telemetry/STATUS), cancel the disconnect.
+            val recovered = System.currentTimeMillis() - lastMessageTime < debounceMs
+            if (recovered) {
+                missedProbes = 0
+                if (_connectionState.value != ConnectionState.Connected) {
+                    _connectionState.value = ConnectionState.Connected
+                }
+                return@launch
+            }
             _telemetry.value = null
             resetPumpStates()
+            stopHeartbeat()
             if (userInitiatedDisconnect) {
                 _connectionState.value = ConnectionState.Disconnected
             } else {
                 consecutiveFailures++
-                // Never permanently give up: the app must reconnect on its own
-                // while backgrounded (the foreground service keeps this process
-                // alive). After the fast backoff is exhausted, keep retrying at
-                // the capped interval so a transient network/Doze drop recovers
-                // without the user reopening the app. Only an explicit
-                // disconnect() (user or full close) stops retrying.
                 if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
                     _connectionState.value = ConnectionState.Failed
                     addLog("System: Connection lost after $MAX_RETRY_ATTEMPTS attempts. Still retrying in the background...")
@@ -388,8 +392,24 @@ class HardwareRepository : HardwareConnection {
         }
     }
 
+    override fun pauseTelemetry() {
+        if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
+            sendCommand("TELEMETRY_PAUSE")
+        }
+    }
+
+    override fun resumeTelemetry() {
+        if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
+            sendCommand("TELEMETRY_RESUME")
+        }
+    }
+
     override fun setWateringInProgress(active: Boolean) {
         wateringInProgress = active
+    }
+
+    override fun logUserAction(message: String) {
+        addLog(message)
     }
 
     private fun addLog(message: String) {

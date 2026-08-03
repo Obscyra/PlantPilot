@@ -114,7 +114,7 @@ interface ApiService {
     suspend fun sync(@Body request: SyncRequest): Response<SyncResponse>
 
     @POST("/api/motor/{id}/water_now")
-    suspend fun waterNow(@Path("id") motorId: Int): Response<GenericResponse>
+    suspend fun waterNow(@Path("id") motorId: Int, @Query("rate") rate: Int? = null): Response<GenericResponse>
 
     @GET("/api/status")
     suspend fun getStatus(): Response<StatusResponse>

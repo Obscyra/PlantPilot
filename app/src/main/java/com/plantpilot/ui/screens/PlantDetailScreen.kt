@@ -169,7 +169,9 @@ fun PlantDetailScreen(
                         value = editableWaterAmount,
                         onValueChange = {
                             editableWaterAmount = it
-                            viewModel.updateWateringAmount(plantId, it.toInt())
+                        },
+                        onValueChangeFinished = {
+                            viewModel.updateWateringAmount(plantId, editableWaterAmount.toInt())
                         },
                         valueRange = 20f..200f,
                         steps = 8,
@@ -347,7 +349,9 @@ fun PlantDetailScreen(
                                 value = editableThreshold,
                                 onValueChange = {
                                     editableThreshold = it
-                                    viewModel.updateMoistureThreshold(plantId, it.toInt())
+                                },
+                                onValueChangeFinished = {
+                                    viewModel.updateMoistureThreshold(plantId, editableThreshold.toInt())
                                 },
                                 valueRange = 10f..60f,
                                 steps = 9,
@@ -404,7 +408,9 @@ fun PlantDetailScreen(
                                 value = editableMinInterval,
                                 onValueChange = {
                                     editableMinInterval = it
-                                    viewModel.updateMinInterval(plantId, it.toInt())
+                                },
+                                onValueChangeFinished = {
+                                    viewModel.updateMinInterval(plantId, editableMinInterval.toInt())
                                 },
                                 valueRange = 2f..24f,
                                 steps = 10,

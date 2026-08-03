@@ -96,9 +96,8 @@ fun HomeScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(all = 24.dp),
-                            level = deviceState.waterTankLevel,
                             tankCapacityMl = deviceState.tankCapacityMl,
-                            sensorValue = deviceState.waterTankSensorValue,
+                            estimatedWaterMl = deviceState.estimatedWaterMl,
                         )
                     }
                 }

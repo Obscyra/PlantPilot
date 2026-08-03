@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     startForegroundService(Intent(this, SyncService::class.java))
+                    hardwareConnection.resumeTelemetry()
                     hardwareConnection.setStreamCadence(viewModel.settings.value.sensorCadenceSec)
                 }
                 Lifecycle.Event.ON_RESUME -> {
@@ -78,7 +79,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.onAppResumed()
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    hardwareConnection.setStreamCadence(BACKGROUND_CADENCE_SEC)
+                    hardwareConnection.pauseTelemetry()
                 }
                 else -> {}
             }
@@ -91,7 +92,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val BACKGROUND_CADENCE_SEC = 3
         private const val REQUEST_NOTIFICATION_PERMISSION = 1
     }
 }

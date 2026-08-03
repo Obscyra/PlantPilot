@@ -23,7 +23,16 @@ interface HardwareConnection {
     fun setStreamCadence(seconds: Int)
     fun isConnected(): Boolean
 
+    /** Tells the ESP32 to stop pushing telemetry frames (app backgrounded). */
+    fun pauseTelemetry()
+
+    /** Tells the ESP32 to resume pushing telemetry frames (app foregrounded). */
+    fun resumeTelemetry()
+
     /** Marks that a watering is in flight so a brief link hiccup during the
      *  relay cycle doesn't flip the UI to "Reconnecting". */
     fun setWateringInProgress(active: Boolean)
+
+    /** Emits a user-action log entry (e.g. "Settings: Flow rate → 11 ml/s"). */
+    fun logUserAction(message: String)
 }

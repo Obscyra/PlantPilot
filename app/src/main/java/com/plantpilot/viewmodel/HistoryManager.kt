@@ -23,6 +23,7 @@ class HistoryManager(
     private val settingsManager: SettingsManager,
     private val notificationHelper: NotificationHelper,
     private val onWateringFinished: (motorNumber: Int) -> Unit,
+    private val onWaterUsed: (amountMl: Int) -> Unit = {},
 ) {
     fun addHistoryEvent(event: WateringEvent) {
         val updatedHistory = (listOf(event) + history.value).take(50)
@@ -30,6 +31,9 @@ class HistoryManager(
         scope.launch {
             settingsManager.saveHistory(updatedHistory)
         }
+
+        // Drain the app-tracked tank estimate by the amount actually used.
+        onWaterUsed(event.amountMl)
 
         // Also update the plant's last watered timestamp
         plants.value = plants.value.map {

@@ -27,6 +27,7 @@ class SettingsManager(private val context: Context) {
         val DEVICE_IP: Preferences.Key<String> = stringPreferencesKey("device_ip")
         val WIFI_SSID: Preferences.Key<String> = stringPreferencesKey("wifi_ssid")
         val TANK_CAPACITY: Preferences.Key<Int> = intPreferencesKey("tank_capacity")
+        val ESTIMATED_WATER_ML: Preferences.Key<Int> = intPreferencesKey("estimated_water_ml")
         val LOW_WATER_THRESHOLD: Preferences.Key<Int> = intPreferencesKey("low_water_threshold")
         val LOW_WATER_ALERT: Preferences.Key<Boolean> = booleanPreferencesKey("low_water_alert")
         val USE_METRIC: Preferences.Key<Boolean> = booleanPreferencesKey("use_metric")
@@ -37,6 +38,7 @@ class SettingsManager(private val context: Context) {
         val TELEMETRY_SNAPSHOT: Preferences.Key<String> = stringPreferencesKey("telemetry_snapshot")
         val MAX_RUNTIME: Preferences.Key<Int> = intPreferencesKey("max_runtime_minutes")
         val SENSOR_CADENCE: Preferences.Key<Int> = intPreferencesKey("sensor_cadence_sec")
+        val PUMP_FLOW_RATE: Preferences.Key<Int> = intPreferencesKey("pump_flow_rate_ml_per_sec")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -45,7 +47,8 @@ class SettingsManager(private val context: Context) {
             ip = prefs[DEVICE_IP]?.takeIf { it.isNotBlank() } ?: DEFAULT_IP,
             ssid = prefs[WIFI_SSID] ?: "Not Set", // Changed from Neural Net
             capacity = prefs[TANK_CAPACITY] ?: 5000,
-            threshold = prefs[LOW_WATER_THRESHOLD] ?: 1
+            threshold = prefs[LOW_WATER_THRESHOLD] ?: 1,
+            estimatedWaterMl = prefs[ESTIMATED_WATER_ML]
         )
     }
 
@@ -57,7 +60,8 @@ class SettingsManager(private val context: Context) {
             useMetricUnits = prefs[USE_METRIC] ?: true,
             use24HourFormat = prefs[USE_24H] ?: false,
             maxRuntimeMinutes = prefs[MAX_RUNTIME] ?: 1,
-            sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 3
+            sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 3,
+            pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10
         )
     }
 
@@ -109,6 +113,7 @@ class SettingsManager(private val context: Context) {
             prefs[WIFI_SSID] = state.wifiSsid
             prefs[TANK_CAPACITY] = state.tankCapacityMl
             prefs[LOW_WATER_THRESHOLD] = state.lowWaterThreshold
+            prefs[ESTIMATED_WATER_ML] = state.estimatedWaterMl
         }
     }
 
@@ -119,6 +124,7 @@ class SettingsManager(private val context: Context) {
             prefs[USE_24H] = settings.use24HourFormat
             prefs[MAX_RUNTIME] = settings.maxRuntimeMinutes
             prefs[SENSOR_CADENCE] = settings.sensorCadenceSec
+            prefs[PUMP_FLOW_RATE] = settings.pumpFlowRateMlPerSec
         }
     }
 
@@ -152,6 +158,7 @@ class SettingsManager(private val context: Context) {
         val ip: String,
         val ssid: String,
         val capacity: Int,
-        val threshold: Int
+        val threshold: Int,
+        val estimatedWaterMl: Int?
     )
 }

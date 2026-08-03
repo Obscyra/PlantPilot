@@ -327,6 +327,7 @@ fun PlantsListScreen(
 
                             // Water Amount
                             Column {
+                                var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
@@ -336,16 +337,19 @@ fun PlantsListScreen(
                                         style = MaterialTheme.typography.bodyLarge
                                     )
                                     Text(
-                                        text = "${plant.waterAmountMl} ml",
+                                        text = "${editableWaterAmount.toInt()} ml",
                                         style = MaterialTheme.typography.bodyLarge,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                                 Slider(
-                                    value = plant.waterAmountMl.toFloat(),
-                                    onValueChange = { 
-                                        viewModel.updateWateringAmount(plant.id, it.toInt())
+                                    value = editableWaterAmount,
+                                    onValueChange = {
+                                        editableWaterAmount = it
+                                    },
+                                    onValueChangeFinished = {
+                                        viewModel.updateWateringAmount(plant.id, editableWaterAmount.toInt())
                                     },
                                     valueRange = 20f..200f,
                                     steps = 8

@@ -82,9 +82,9 @@ class PlantPilotRepository {
         }
     }
 
-    suspend fun waterNow(motorId: Int): Result<GenericResponse> {
+    suspend fun waterNow(motorId: Int, rate: Int? = null): Result<GenericResponse> {
         return try {
-            val response = api.waterNow(motorId)
+            val response = api.waterNow(motorId, rate)
             val body = response.body()
             if (response.isSuccessful && body != null) {
                 Result.success(body)
