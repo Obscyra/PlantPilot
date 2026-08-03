@@ -49,6 +49,7 @@ fun PlantDetailScreen(
     var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
     var editableThreshold by remember(plant.moistureThreshold) { mutableFloatStateOf(plant.moistureThreshold.toFloat()) }
     var editableMinInterval by remember(plant.minIntervalHours) { mutableFloatStateOf(plant.minIntervalHours.toFloat()) }
+    var editableMaxRuntime by remember(plant.maxRuntimeMinutes) { mutableFloatStateOf(plant.maxRuntimeMinutes.toFloat()) }
 
     var showScheduleSheet by remember { mutableStateOf(false) }
     var editingSchedule by remember { mutableStateOf<WateringSchedule?>(null) }
@@ -401,6 +402,30 @@ fun PlantDetailScreen(
                                 valueRange = 2f..24f,
                                 steps = 10,
                                 modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Max runtime
+                            Text(
+                                text = "Max runtime: ${editableMaxRuntime.toInt()} min",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Slider(
+                                value = editableMaxRuntime,
+                                onValueChange = {
+                                    editableMaxRuntime = it
+                                    viewModel.updateMaxRuntime(plantId, it.toInt())
+                                },
+                                valueRange = 0f..10f,
+                                steps = 9,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                text = "0 = no limit",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         WateringMode.OFF -> {

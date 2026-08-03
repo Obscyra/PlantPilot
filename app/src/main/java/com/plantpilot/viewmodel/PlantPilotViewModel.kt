@@ -354,7 +354,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     },
                     configVersion = dev.version,
                     lastUpdated = dev.last_modified * 1000,
-                    mlPerSec = dev.ml_per_sec ?: it.mlPerSec
+                    mlPerSec = dev.ml_per_sec ?: it.mlPerSec,
+                    maxRuntimeMinutes = dev.max_runtime_minutes ?: it.maxRuntimeMinutes
                 )
             } else it
         }
@@ -561,6 +562,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     version = plant.configVersion,
                     last_modified = plant.lastUpdated / 1000,
                     ml_per_sec = plant.mlPerSec,
+                    max_runtime_minutes = plant.maxRuntimeMinutes,
                     schedules = plant.schedules
                 )
             }
@@ -647,6 +649,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateMinInterval(plantId: String, hours: Int) {
         updatePlant(plantId) { it.copy(minIntervalHours = hours) }
+        markConfigDirty(autoSync = true)
+    }
+
+    fun updateMaxRuntime(plantId: String, minutes: Int) {
+        updatePlant(plantId) { it.copy(maxRuntimeMinutes = minutes) }
         markConfigDirty(autoSync = true)
     }
 

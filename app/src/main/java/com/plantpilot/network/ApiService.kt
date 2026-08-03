@@ -31,6 +31,7 @@ data class MotorConfig(
     val version: Int = 1,
     val last_modified: Long = 0, // epoch seconds, used for two-way sync
     val ml_per_sec: Int = 10,
+    val max_runtime_minutes: Int = 1,
     val schedules: List<WateringSchedule> = emptyList()
 )
 
@@ -90,6 +91,8 @@ data class DeviceMotorConfig(
     val calibration_wet: Int? = null,
     val last_watered: Long? = null,
     val ml_per_sec: Int? = null,
+    val max_runtime_minutes: Int? = null,
+    val stop_on_disconnect: Boolean? = null,
     val schedules: List<DeviceSchedule> = emptyList()
 )
 

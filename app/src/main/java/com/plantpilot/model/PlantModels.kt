@@ -51,7 +51,8 @@ data class Plant(
     val wetCalibration: Int,
     val configVersion: Int = 1,
     val lastUpdated: Long = 0, // epoch millis, used for two-way sync with the ESP32
-    val mlPerSec: Int = 10 // Per-pump flow rate (ml/sec)
+    val mlPerSec: Int = 10, // Per-pump flow rate (ml/sec)
+    val maxRuntimeMinutes: Int = 1 // Max minutes pump can run (0 = no limit)
 )
 
 @Serializable
