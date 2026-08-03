@@ -36,6 +36,7 @@
 
 ### App
 - **Live dashboard** — per-plant moisture rings, water tank level, connection status.
+- **Background resilience** — holds a wake lock and self-reconnects after a process kill, so watering and sync keep working when the app is backgrounded or swiped away (the connection only drops when you fully close the app).
 - **Scheduling** — per-plant daily/weekly watering schedules (up to 5 per pump).
 - **Auto-watering** — moisture-threshold triggered watering with min-interval guard.
 - **Water now** — instant manual watering with a 3s watering animation overlay.
@@ -50,9 +51,10 @@
 - **STA mode** with **SoftAP captive-portal setup** fallback (`PlantPilot-Setup`, random 8-char password printed to Serial).
 - **mDNS** hostname `plantpilot` → app connects by default as `http://plantpilot.local/`.
 - NTP time sync (UTC+6) persisted to NVS so schedules survive reboots.
-- Adaptive idle: telemetry every **3s** with a client connected, **60s** when idle, zero reads when nobody is listening.
+- Adaptive telemetry: **1s** foreground / **3s** background with a client connected, **60s** when idle.
+- Background power saving via logical sensor-off: with the app closed, the telemetry path early-returns so no sensors are read at all; only plants with **auto-watering** enabled get their own sensor re-read (per-plant, every **10 min**), so sensors are logically off the rest of the time.
 - Resilience: WiFi reconnect with escalating radio reset/restart, per-pump configurable `mlPerSecond`, max-runtime failsafe, and `stopOnDisconnect`.
-- Full **Serial diagnostics**: boot logs reset reason + free heap; every WS command echoed as `[WS] RX` / `[WS] TX` so the Arduino IDE monitor matches the app's Serial Output screen.
+- Full **Serial diagnostics**: boot logs reset reason + free heap; every WS command echoed as `[WS] RX` / `[WS] TX`; stale/evicted clients, WS stalls, low-heap warnings, and a periodic `[IDLE]` status line (WiFi/RSSI, cached soil %, pumps, water, heap, uptime) when disconnected so the monitor shows the device is alive.
 - Command safety: heavy telemetry builds run on the main loop stack (not the AsyncTCP task), and STATUS replies use a fixed buffer.
 
 ---
@@ -172,7 +174,8 @@ Messages from the device:
 ### Adaptive Power Saving
 
 - `WiFi.setSleep(WIFI_PS_MIN_MODEM)` — light modem sleep keeps reconnects near-instant.
-- Telemetry cadence: **3s** with a connected WebSocket client, **60s** when idle; `broadcastTelemetry()` early-returns when `ws.count() == 0`.
+- Telemetry cadence: **1s** foreground / **3s** background with a WebSocket client, **60s** when idle; `broadcastTelemetry()` early-returns when `ws.count() == 0`.
+- **Logical sensor-off:** while disconnected, no sensors are read by the dashboard path. Only plants with auto-watering enabled get a fresh per-plant sensor read every **10 min** just before their watering decision; all other sensors stay logically off.
 - Schedules and auto-watering checks still run every **1s** regardless of connection state — watering is never degraded.
 
 ---
@@ -223,6 +226,7 @@ PlantPilot/
 
 **Working today:**
 - WebSocket + REST networking, state-machine connection handling with exponential backoff, auto-reconnect, and heartbeat.
+- Background-safe sync: wake lock + self-reconnect so the link survives app backgrounding and process restarts.
 - Configuration sync, scheduling, auto-watering, manual watering.
 - Real-time history persistence, low-water notifications.
 - Pump hardware diagnostics terminal.
