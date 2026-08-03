@@ -506,7 +506,7 @@ void loadConfigs() {
             motorConfigs[i-1].lastModified = 0;
             motorConfigs[i-1].scheduleCount = 0;
             motorConfigs[i-1].mlPerSecond = DEFAULT_ML_PER_SECOND;
-            motorConfigs[i-1].maxRuntimeMinutes = 30;
+            motorConfigs[i-1].maxRuntimeMinutes = 1;
             motorConfigs[i-1].stopOnDisconnect = false;
         }
     }
@@ -866,7 +866,7 @@ void setupApi() {
                 motorConfigs[idx].version = newVersion;
                 motorConfigs[idx].lastModified = incomingLastModified;
                 motorConfigs[idx].mlPerSecond = constrain((int)m["ml_per_sec"] | DEFAULT_ML_PER_SECOND, 0, MAX_ML_PER_SECOND);
-                motorConfigs[idx].maxRuntimeMinutes = max((int)m["max_runtime_minutes"] | 30, 0);
+                motorConfigs[idx].maxRuntimeMinutes = max((int)m["max_runtime_minutes"] | 1, 0);
                 motorConfigs[idx].stopOnDisconnect = m["stop_on_disconnect"] | false;
 
                 JsonArray schedules = m["schedules"];
