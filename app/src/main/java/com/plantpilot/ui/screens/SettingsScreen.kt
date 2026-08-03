@@ -44,8 +44,8 @@ fun SettingsScreen(
     val deviceState by viewModel.deviceState.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
-    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
-    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val canSendCommands = com.plantpilot.data.ConnectionStateHelper.canSendCommands(connectionState)
+    val canDisplayLastKnownData = com.plantpilot.data.ConnectionStateHelper.canDisplayLastKnownData(connectionState)
     val telemetry by viewModel.telemetry.collectAsState()
 
     // Field drafts are kept local while editing and only pushed to the ViewModel

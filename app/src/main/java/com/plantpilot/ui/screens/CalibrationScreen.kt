@@ -56,8 +56,8 @@ fun CalibrationScreen(
     onBack: () -> Unit,
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
-    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
-    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val canSendCommands = com.plantpilot.data.ConnectionStateHelper.canSendCommands(connectionState)
+    val canDisplayLastKnownData = com.plantpilot.data.ConnectionStateHelper.canDisplayLastKnownData(connectionState)
     val displayConnectionState by viewModel.displayConnectionState.collectAsState()
     val telemetry by viewModel.telemetry.collectAsState()
     val existingCalibration by viewModel.sensorCalibration.collectAsState()

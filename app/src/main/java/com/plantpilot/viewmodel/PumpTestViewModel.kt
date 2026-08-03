@@ -3,8 +3,9 @@ package com.plantpilot.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.plantpilot.PlantPilotApp
 import com.plantpilot.data.ConnectionState
-import com.plantpilot.data.HardwareRepository
+import com.plantpilot.data.ConnectionStateHelper
 import com.plantpilot.data.SettingsManager
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -12,41 +13,20 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
 class PumpTestViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = HardwareRepository
+    private val repository = (application as PlantPilotApp).hardwareConnection
     private val settingsManager = SettingsManager(application)
-    
+
     val connectionState = repository.connectionState
     val canSendCommands: Boolean
-        get() = connectionState.value == ConnectionState.Connected
+        get() = ConnectionStateHelper.canSendCommands(connectionState.value)
     val canDisplayLastKnownData: Boolean
-        get() {
-            val s = connectionState.value
-            return s == ConnectionState.Connected || s == ConnectionState.Reconnecting
-        }
+        get() = ConnectionStateHelper.canDisplayLastKnownData(connectionState.value)
 
     // Delayed-reveal variant for display-layer consumers only (same semantics as
-    // PlantPilotViewModel.displayConnectionState — see that file for rationale).
-    private val _displayConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
-    val displayConnectionState: StateFlow<ConnectionState> = _displayConnectionState.asStateFlow()
-    private var reconnectRevealJob: kotlinx.coroutines.Job? = null
+    // PlantPilotViewModel.displayConnectionState — see ConnectionStateHelper).
+    val displayConnectionState: StateFlow<ConnectionState> =
+        ConnectionStateHelper.debouncedConnectionState(repository.connectionState, viewModelScope)
 
-    init {
-        viewModelScope.launch {
-            connectionState.collect { real ->
-                if (real == ConnectionState.Reconnecting) {
-                    reconnectRevealJob?.cancel()
-                    reconnectRevealJob = launch {
-                        delay(500)
-                        _displayConnectionState.value = ConnectionState.Reconnecting
-                    }
-                } else {
-                    reconnectRevealJob?.cancel()
-                    reconnectRevealJob = null
-                    _displayConnectionState.value = real
-                }
-            }
-        }
-    }
     val pumpStates = repository.pumpStates
     val telemetry = repository.telemetry
 

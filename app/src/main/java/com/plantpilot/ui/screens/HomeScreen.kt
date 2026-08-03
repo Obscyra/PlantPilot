@@ -30,8 +30,8 @@ fun HomeScreen(
     val settings by viewModel.settings.collectAsState()
     val deviceState by viewModel.deviceState.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
-    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
-    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val canSendCommands = com.plantpilot.data.ConnectionStateHelper.canSendCommands(connectionState)
+    val canDisplayLastKnownData = com.plantpilot.data.ConnectionStateHelper.canDisplayLastKnownData(connectionState)
     var isRefreshing by remember { mutableStateOf(value = false) }
     var showWateringSnackbar by remember { mutableStateOf(value = false) }
     var wateringPlantName by remember { mutableStateOf(value = "") }
