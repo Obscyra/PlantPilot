@@ -1,9 +1,11 @@
 package com.plantpilot.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -15,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
@@ -686,17 +689,21 @@ fun SettingsScreen(
                         ) {
                             DeveloperCard(
                                 name = "Fahim Shahriar",
-                                githubUrl = "https://github.com/placeholder_fahim",
-                                facebookUrl = "https://facebook.com/placeholder_fahim",
-                                linkedinUrl = "https://linkedin.com/in/placeholder_fahim",
+                                role = "Founder",
+                                tldr = "UI, Firmware & Backend",
+                                githubUrl = "https://github.com/Obscyra",
+                                discordUrl = "https://discord.com/users/738800534793879584",
+                                linkedinUrl = "https://www.linkedin.com/in/fahimshahriar-sec/",
                                 onLinkClick = { uriHandler.openUri(it) }
                             )
 
                             DeveloperCard(
                                 name = "Mahim Chowdhury Miraj",
-                                githubUrl = "https://github.com/placeholder_mahim",
-                                facebookUrl = "https://facebook.com/placeholder_mahim",
-                                linkedinUrl = "https://linkedin.com/in/placeholder_mahim",
+                                role = "Co-founder",
+                                tldr = "Hardware, Wiring & Assembly",
+                                githubUrl = "https://github.com/M4H1M",
+                                discordUrl = "https://discord.com/users/730070706028806185",
+                                linkedinUrl = "https://www.linkedin.com/",
                                 onLinkClick = { uriHandler.openUri(it) }
                             )
                         }
@@ -782,55 +789,142 @@ fun SettingsScreen(
 @Composable
 private fun DeveloperCard(
     name: String,
+    role: String,
+    tldr: String,
     githubUrl: String,
-    facebookUrl: String,
+    discordUrl: String,
     linkedinUrl: String,
     onLinkClick: (String) -> Unit
 ) {
+    val scheme = MaterialTheme.colorScheme
+
+    // Initials for the avatar badge (e.g. "Mahim Chowdhury Miraj" -> "MC").
+    val initials = name.split(" ").filter { it.isNotBlank() }
+        .joinToString("") { it.firstOrNull()?.uppercase() ?: "" }.take(2)
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        shape = MaterialTheme.shapes.medium,
+        color = scheme.surfaceContainerHigh,
+        border = BorderStroke(
+            1.dp,
+            scheme.primary.copy(alpha = 0.25f)
+        ),
+        // Subtle top accent in the brand green
+        shadowElevation = 2.dp
     ) {
         Column(
-            modifier = Modifier.padding(12.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            scheme.surfaceContainerHigh.copy(alpha = 0.4f),
+                            scheme.surfaceContainerHigh
+                        )
+                    )
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = name,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Start,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = { onLinkClick(githubUrl) }) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_github),
-                        contentDescription = "GitHub",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(20.dp)
+                // Avatar badge
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.linearGradient(
+                                listOf(scheme.primary, scheme.primary.copy(alpha = 0.5f))
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initials,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF0D2D00)
                     )
                 }
-                IconButton(onClick = { onLinkClick(facebookUrl) }) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_facebook),
-                        contentDescription = "Facebook",
-                        tint = Color.Unspecified,
-                        modifier = Modifier.size(20.dp)
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = scheme.onSurface
                     )
-                }
-                IconButton(onClick = { onLinkClick(linkedinUrl) }) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_linkedin),
-                        contentDescription = "LinkedIn",
-                        tint = Color.Unspecified,
-                        modifier = Modifier.size(20.dp)
+                    Text(
+                        text = role,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.primary
+                    )
+                    Text(
+                        text = tldr,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant
                     )
                 }
             }
+
+            HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f))
+
+            // Social links as icon-only circular buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SocialIconButton(
+                    painterResourceId = R.drawable.ic_github,
+                    tint = scheme.onSurface,
+                    onClick = { onLinkClick(githubUrl) }
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                SocialIconButton(
+                    painterResourceId = R.drawable.ic_linkedin,
+                    tint = scheme.onSurface,
+                    onClick = { onLinkClick(linkedinUrl) }
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                SocialIconButton(
+                    painterResourceId = R.drawable.ic_discord,
+                    tint = scheme.onSurface,
+                    onClick = { onLinkClick(discordUrl) }
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SocialIconButton(
+    painterResourceId: Int,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.size(44.dp),
+        shape = CircleShape,
+        color = scheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.4f)),
+        onClick = onClick
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(id = painterResourceId),
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

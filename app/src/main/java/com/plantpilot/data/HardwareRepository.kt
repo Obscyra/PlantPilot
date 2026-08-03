@@ -130,6 +130,13 @@ object HardwareRepository {
     ))
     val pumpStates: StateFlow<Map<Int, Boolean>> = _pumpStates
 
+    /** True when a live WebSocket is open (Connected or mid-reconnect). */
+    fun isConnected(): Boolean {
+        val s = _connectionState.value
+        return s == ConnectionState.Connected || s == ConnectionState.Reconnecting ||
+            s == ConnectionState.Connecting
+    }
+
     fun connect(url: String) {
         if (url == currentUrl && _connectionState.value == ConnectionState.Connected) return
         currentUrl = url
@@ -218,13 +225,19 @@ object HardwareRepository {
                 _connectionState.value = ConnectionState.Disconnected
             } else {
                 consecutiveFailures++
+                // Never permanently give up: the app must reconnect on its own
+                // while backgrounded (the foreground service keeps this process
+                // alive). After the fast backoff is exhausted, keep retrying at
+                // the capped interval so a transient network/Doze drop recovers
+                // without the user reopening the app. Only an explicit
+                // disconnect() (user or full close) stops retrying.
                 if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
                     _connectionState.value = ConnectionState.Failed
-                    addLog("System: Connection failed after $MAX_RETRY_ATTEMPTS attempts. Tap to retry.")
+                    addLog("System: Connection lost after $MAX_RETRY_ATTEMPTS attempts. Still retrying in the background...")
                 } else {
                     _connectionState.value = ConnectionState.Reconnecting
-                    scheduleReconnect()
                 }
+                scheduleReconnect()
             }
         }
     }
@@ -386,7 +399,15 @@ object HardwareRepository {
                 
                 if (type == "telemetry") {
                     val response = json.decodeFromJsonElement<DeviceStatusResponse>(element)
+                    // Detect an ESP32 reboot: a freshly-rebooted device reports a
+                    // small uptime after we previously saw a much larger one. This
+                    // distinguishes a real device reset from a mere socket drop.
+                    val prevUptime = _telemetry.value?.uptime_sec ?: 0L
                     _telemetry.value = response
+                    val uptime = response.uptime_sec ?: 0L
+                    if (prevUptime > 0 && uptime < prevUptime - 60L) {
+                        addLog("System: ESP32 rebooted (uptime reset ${prevUptime}s -> ${uptime}s)")
+                    }
                     // Don't sync pump states from telemetry — it overwrites local
                     // toggles before the ESP32 confirms. States are synced via
                     // OK responses and STATUS replies instead.
