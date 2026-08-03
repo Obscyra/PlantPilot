@@ -122,6 +122,10 @@ unsigned long lastAutoWaterTime[4] = {0, 0, 0, 0};
 const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
 bool calibrationStreamActive = false;
 unsigned long lastSensorSent = 0;
+// Set by the WS command handler (AsyncTCP task) to ask loop() to run the heavy
+// broadcastTelemetry() on the main loop stack instead of the small async task
+// stack, preventing a stack overflow when a command triggers a full sensor read.
+volatile bool pendingSensorRead = false;
 
 // Staggered pump update state to prevent network blocking and power surges
 struct StartReq {
@@ -657,10 +661,13 @@ void startSetupMode() {
 
 void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     cmd.trim();
+    Serial.printf("[%s] [WS] RX: %s\n", getLocalTimeStr().c_str(), cmd.c_str());
     if (cmd == "READ_SENSORS") {
         // Force an immediate sensor read + telemetry push (app open/resume).
+        // Deferred to loop(): broadcastTelemetry() builds a large JSON payload
+        // and must run on the main loop's stack, not this small AsyncTCP task.
         lastSensorSent = 0;
-        broadcastTelemetry();
+        pendingSensorRead = true;
     } else if (cmd.startsWith("SYNC_MODE ")) {
         // App signals its lifecycle: foreground 1s, background 3s. Clamped so a
         // bad value can't starve or flood the stream.
@@ -674,18 +681,30 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         doc["cmd"] = "SYNC_MODE";
         doc["cadence"] = seconds;
         String resp; serializeJson(doc, resp);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), resp.c_str());
         client->text(resp);
     } else if (cmd == "CAL_STREAM_ON") {
         calibrationStreamActive = true;
         Serial.println("[SENSOR] Calibration streaming ON (1s cadence)");
         client->text("{\"type\":\"ok\",\"cmd\":\"CAL_STREAM_ON\"}");
+        Serial.println("[WS] TX: {\"type\":\"ok\",\"cmd\":\"CAL_STREAM_ON\"}");
     } else if (cmd == "CAL_STREAM_OFF") {
         calibrationStreamActive = false;
         Serial.println("[SENSOR] Calibration streaming OFF");
         client->text("{\"type\":\"ok\",\"cmd\":\"CAL_STREAM_OFF\"}");
+        Serial.println("[WS] TX: {\"type\":\"ok\",\"cmd\":\"CAL_STREAM_OFF\"}");
     } else if (cmd == "STATUS") {
-        String status = ""; for (int i = 0; i < 4; i++) status += "Pump" + String(i + 1) + ": " + (pumps[i].isOn ? "ON" : "OFF") + (i < 3 ? "\n" : "");
+        // Fixed-size buffer instead of String concatenation: this runs on the
+        // AsyncTCP event task where repeated String reallocations fragment the
+        // heap and risk stack/alloc failures on a freshly connected client.
+        char status[64];
+        int off = 0;
+        for (int i = 0; i < 4; i++) {
+            off += snprintf(status + off, sizeof(status) - off, "Pump%d: %s%s",
+                            i + 1, pumps[i].isOn ? "ON" : "OFF", i < 3 ? "\n" : "");
+        }
         client->text(status);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), status);
     } else if (cmd == "RESET_CONFIG") {
         preferences.begin("plantpilot", false);
         preferences.clear();
@@ -693,6 +712,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         Serial.println("[SYSTEM] Configuration Reset requested by App");
         loadConfigs(); // Re-initialize with defaults
         client->text("{\"type\":\"ok\",\"cmd\":\"RESET_CONFIG\"}");
+        Serial.println("[WS] TX: {\"type\":\"ok\",\"cmd\":\"RESET_CONFIG\"}");
     } else if (cmd == "PUMP_ALL_ON") {
         for (int i = 0; i < 4; i++) requestPumpStart(i, 0, "manual");
 
@@ -702,6 +722,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
         String resp; serializeJson(doc, resp);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), resp.c_str());
         client->text(resp);
     } else if (cmd == "PUMP_ALL_OFF") {
         staggeredStopPending = true;
@@ -716,6 +737,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
         String resp; serializeJson(doc, resp);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), resp.c_str());
         client->text(resp);
     } else if (cmd.startsWith("PUMP") && cmd.endsWith("_ON")) {
         char letter = cmd.charAt(4);
@@ -727,6 +749,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
         String resp; serializeJson(doc, resp);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), resp.c_str());
         client->text(resp);
     }
 else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
@@ -739,6 +762,7 @@ else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
         String resp; serializeJson(doc, resp);
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr().c_str(), resp.c_str());
         client->text(resp);
     }
 }
@@ -963,6 +987,23 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 void setup() {
     Serial.begin(115200); delay(500); Serial.printf("\n[%s] [SYSTEM] Booting PlantPilot...\n", getLocalTimeStr().c_str());
+    // Map reset reason to a readable string (esp_reset_reason_str is not
+    // available on all core versions).
+    const char* resetReason;
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:     resetReason = "POWERON"; break;
+        case ESP_RST_EXT:         resetReason = "EXTERNAL"; break;
+        case ESP_RST_SW:          resetReason = "SOFTWARE"; break;
+        case ESP_RST_PANIC:       resetReason = "PANIC"; break;
+        case ESP_RST_INT_WDT:     resetReason = "INTERRUPT_WATCHDOG"; break;
+        case ESP_RST_TASK_WDT:    resetReason = "TASK_WATCHDOG"; break;
+        case ESP_RST_WDT:         resetReason = "OTHER_WATCHDOG"; break;
+        case ESP_RST_DEEPSLEEP:   resetReason = "DEEP_SLEEP"; break;
+        case ESP_RST_BROWNOUT:    resetReason = "BROWNOUT"; break;
+        case ESP_RST_SDIO:        resetReason = "SDIO"; break;
+        default:                  resetReason = "UNKNOWN"; break;
+    }
+    Serial.printf("[SYSTEM] Reset reason: %s, free heap: %u bytes\n", resetReason, ESP.getFreeHeap());
     initStatusLed(); initRelays(); loadConfigs();
 
     // Load persisted time and rebase against current boot millis
@@ -984,8 +1025,13 @@ void setup() {
     setupApi();
     ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len){
         if (type == WS_EVT_CONNECT) {
+            Serial.printf("[%s] [WS] Client connected (total: %u, heap: %u)\n",
+                getLocalTimeStr().c_str(), ws.count(), ESP.getFreeHeap());
             client->text("PlantPilot Ready");
+            Serial.println("[WS] TX: PlantPilot Ready");
         } else if (type == WS_EVT_DISCONNECT) {
+            Serial.printf("[%s] [WS] Client disconnected (total: %u)\n",
+                getLocalTimeStr().c_str(), ws.count());
             // If any pump has stopOnDisconnect, queue a stop
             for (int i = 0; i < 4; i++) {
                 if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
@@ -999,6 +1045,7 @@ void setup() {
         } else if (type == WS_EVT_DATA) {
             // Accumulate data across possible fragments
             String cmd = "";
+            cmd.reserve(len);
             for (size_t i = 0; i < len; i++) cmd += (char)data[i];
             if (cmd.length() > 0) handleWsCommand(cmd, client);
         }
@@ -1067,7 +1114,14 @@ void loop() {
     static unsigned long lastTele = 0;
     unsigned long telemetryMs = calibrationStreamActive ? 1000UL
                     : (ws.count() > 0 ? streamCadenceMs : 60000UL);
-    if (loopStart - lastTele > telemetryMs) { lastTele = loopStart; broadcastTelemetry(); }
+    if (pendingSensorRead || (loopStart - lastTele > telemetryMs)) {
+        // READ_SENSORS from the WS handler defers the heavy JSON build to here,
+        // on the main loop stack. Also reset the timer so the forced push isn't
+        // immediately followed by a regular cadence push.
+        pendingSensorRead = false;
+        lastTele = loopStart;
+        broadcastTelemetry();
+    }
 
     static unsigned long lastCheck = 0;
     if (loopStart - lastCheck > 1000) { lastCheck = loopStart; checkSchedules(); checkAutoWatering(); }
