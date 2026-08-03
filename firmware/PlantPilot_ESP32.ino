@@ -116,6 +116,11 @@ int waterLevel = 100;
 // per-plant min auto-water interval. Reset to 0 on boot (no gating until the
 // first completion). Uses millis() for internal robustness against NTP issues.
 unsigned long lastAutoWaterTime[4] = {0, 0, 0, 0};
+// Last time each plant's sensor was freshly read for auto-watering decisions.
+// 0 = boot, so the first check reads immediately. Auto-mode plants are only
+// re-read every SENSOR_READ_INTERVAL_MS (10 min) so the ADC stays logically
+// off the rest of the time when the app is closed.
+unsigned long lastAutoSensorRead[4] = {0, 0, 0, 0};
 
 // Sensor read cadence. Raw ADC readings are only refreshed every 10 minutes
 // for the dashboard; opening the calibration sheet forces a 1s realtime stream.
@@ -651,7 +656,15 @@ void checkAutoWatering() {
         // 2. Check session-based millis (protects against rapid loops even if NTP is broken)
         if (lastAutoWaterTime[i] != 0 && (nowMs - lastAutoWaterTime[i]) < minGapMs) continue;
 
-        // Use cached moisture from telemetry instead of reading sensor again
+        // Read a fresh sensor value for this plant only, throttled to every
+        // SENSOR_READ_INTERVAL_MS (10 min) so the ADC is logically off the rest
+        // of the time when the app is closed. A zero timestamp (boot) forces an
+        // immediate first read.
+        if (lastAutoSensorRead[i] == 0 || nowMs - lastAutoSensorRead[i] >= SENSOR_READ_INTERVAL_MS) {
+            lastAutoSensorRead[i] = nowMs;
+            soilMoisture[i] = readMoisture(i);
+            Serial.printf("[%s] [SENSOR] Auto read %s: %d%%\n", getLocalTimeStr(), pumps[i].name, soilMoisture[i]);
+        }
         int moisture = soilMoisture[i];
         if (moisture < motorConfigs[i].moistureThreshold) {
             Serial.printf("[%s] [AUTO] Low moisture on %s: %d%% < %d%%. Queuing start.\n", getLocalTimeStr(), pumps[i].name, moisture, motorConfigs[i].moistureThreshold);
