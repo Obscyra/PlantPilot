@@ -38,7 +38,12 @@ class TelemetryProcessor(
     private val SNAPSHOT_SAVE_INTERVAL_MS = 2000L
 
     fun applyTelemetry(status: DeviceStatusResponse) {
-        val tankLevel = percentageToLevel(status.water_level)
+        // The firmware currently hardcodes water_level=100 and never decrements
+        // it, so it can't drive the displayed tank level. Until a real tank
+        // sensor is wired, derive the discrete level from the app-tracked
+        // estimate (estimatedWaterMl).
+        val capacity = deviceState.value.tankCapacityMl
+        val tankLevel = mlToLevel(deviceState.value.estimatedWaterMl, capacity)
         deviceState.value = deviceState.value.copy(
             waterTankLevel = tankLevel,
             wifiSsid = status.wifi_ssid ?: deviceState.value.wifiSsid
@@ -76,12 +81,14 @@ class TelemetryProcessor(
         }
     }
 
-    private fun percentageToLevel(percentage: Int): Int {
+    private fun mlToLevel(ml: Int, capacity: Int): Int {
+        if (capacity <= 0) return 0
+        val pct = (ml.toFloat() / capacity * 100).toInt().coerceIn(0, 100)
         return when {
-            percentage <= 10 -> 0
-            percentage <= 35 -> 1
-            percentage <= 60 -> 2
-            percentage <= 85 -> 3
+            pct <= 10 -> 0
+            pct <= 35 -> 1
+            pct <= 60 -> 2
+            pct <= 85 -> 3
             else -> 4
         }
     }

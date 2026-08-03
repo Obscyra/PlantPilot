@@ -121,6 +121,12 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         settingsManager = settingsManager,
         notificationHelper = notificationHelper,
         onWateringFinished = { motor -> pendingWatering.remove(motor)?.complete(true) },
+        onWaterUsed = { ml ->
+            _deviceState.value = _deviceState.value.copy(
+                estimatedWaterMl = (_deviceState.value.estimatedWaterMl - ml).coerceAtLeast(0)
+            )
+            viewModelScope.launch { settingsManager.saveDeviceState(_deviceState.value) }
+        },
     )
 
     private val syncCoordinator: SyncCoordinator = SyncCoordinator(
@@ -190,7 +196,9 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     deviceIp = partial.ip,
                     wifiSsid = partial.ssid,
                     tankCapacityMl = partial.capacity,
-                    lowWaterThreshold = partial.threshold
+                    lowWaterThreshold = partial.threshold,
+                    // Fresh install has no persisted estimate -> assume full tank.
+                    estimatedWaterMl = partial.estimatedWaterMl ?: partial.capacity
                 )
                 NetworkModule.updateBaseUrl(partial.ip)
 
@@ -398,7 +406,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         hardwareRepository.setWateringInProgress(true)
 
         return try {
-            val result = repository.waterNow(plant.motorNumber)
+            val result = repository.waterNow(plant.motorNumber, plant.mlPerSec)
             if (result.isSuccess) {
                 // Wait for the actual watering_finished event from the firmware (up to 60s timeout)
                 try {
@@ -434,6 +442,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateWateringAmount(plantId: String, amountMl: Int) {
         configManager.updateWateringAmount(plantId, amountMl)
+        val name = _plants.value.find { it.id == plantId }?.name ?: plantId
+        hardwareRepository.logUserAction("Settings: $name water amount → ${amountMl} ml")
     }
 
     fun updatePlantName(plantId: String, name: String) {
@@ -442,20 +452,34 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateMoistureThreshold(plantId: String, threshold: Int) {
         configManager.updateMoistureThreshold(plantId, threshold)
+        val name = _plants.value.find { it.id == plantId }?.name ?: plantId
+        hardwareRepository.logUserAction("Settings: $name threshold → ${threshold}%")
     }
 
     fun updateMinInterval(plantId: String, hours: Int) {
         configManager.updateMinInterval(plantId, hours)
+        val name = _plants.value.find { it.id == plantId }?.name ?: plantId
+        hardwareRepository.logUserAction("Settings: $name min interval → ${hours}h")
     }
 
     fun updateGlobalMaxRuntime(minutes: Int) {
         updateSettings { it.copy(maxRuntimeMinutes = minutes) }
+        hardwareRepository.logUserAction("Settings: Max runtime → ${minutes} min")
         syncCoordinator.markConfigDirty(autoSync = true)
     }
 
     fun updateSensorCadence(seconds: Int) {
         updateSettings { it.copy(sensorCadenceSec = seconds) }
+        hardwareRepository.logUserAction("Settings: Sensor update rate → ${seconds}s")
         hardwareRepository.setStreamCadence(seconds)
+    }
+
+    fun updatePumpFlowRate(mlPerSec: Int) {
+        updateSettings { it.copy(pumpFlowRateMlPerSec = mlPerSec) }
+        hardwareRepository.logUserAction("Settings: Pump flow rate → ${mlPerSec} ml/s")
+        _plants.value = _plants.value.map { it.copy(mlPerSec = mlPerSec) }
+        configManager.persistPlants()
+        syncCoordinator.markConfigDirty(autoSync = true)
     }
 
     fun deletePlant(plantId: String) {

@@ -76,7 +76,8 @@ data class DeviceState(
     val waterTankLevel: Int,       // 0-4 (4 discrete levels)
     val waterTankSensorValue: Int, // mock sensor reading 0-1023
     val tankCapacityMl: Int,
-    val lowWaterThreshold: Int     // 0-4 level threshold
+    val lowWaterThreshold: Int,    // 0-4 level threshold
+    val estimatedWaterMl: Int = 0  // App-tracked remaining water, full on fresh install
 )
 
 data class AppSettings(
@@ -86,5 +87,6 @@ data class AppSettings(
     val useMetricUnits: Boolean,
     val use24HourFormat: Boolean,
     val maxRuntimeMinutes: Int = 1,
-    val sensorCadenceSec: Int = 3
+    val sensorCadenceSec: Int = 3,
+    val pumpFlowRateMlPerSec: Int = 10
 )

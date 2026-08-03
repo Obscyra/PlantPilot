@@ -91,9 +91,11 @@ fun HardwareSettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    var editableMaxRuntime by remember(settings.maxRuntimeMinutes) { mutableFloatStateOf(settings.maxRuntimeMinutes.toFloat()) }
                     Slider(
-                        value = settings.maxRuntimeMinutes.toFloat(),
-                        onValueChange = { viewModel.updateGlobalMaxRuntime(it.toInt()) },
+                        value = editableMaxRuntime,
+                        onValueChange = { editableMaxRuntime = it },
+                        onValueChangeFinished = { viewModel.updateGlobalMaxRuntime(editableMaxRuntime.toInt()) },
                         valueRange = 0f..10f,
                         steps = 9,
                         modifier = Modifier.fillMaxWidth()
@@ -104,6 +106,52 @@ fun HardwareSettingsScreen(
                     ) {
                         Text("Off", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("10 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Pump Flow Rate",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Calibrated ml per second for all pumps (used to calculate watering duration)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${settings.pumpFlowRateMlPerSec} ml/sec",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    var editableFlowRate by remember(settings.pumpFlowRateMlPerSec) { mutableFloatStateOf(settings.pumpFlowRateMlPerSec.toFloat()) }
+                    Slider(
+                        value = editableFlowRate,
+                        onValueChange = { editableFlowRate = it },
+                        onValueChangeFinished = { viewModel.updatePumpFlowRate(editableFlowRate.toInt()) },
+                        valueRange = 1f..30f,
+                        steps = 28,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("1 ml/s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("30 ml/s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -142,9 +190,11 @@ fun HardwareSettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    var editableCadence by remember(settings.sensorCadenceSec) { mutableFloatStateOf(settings.sensorCadenceSec.toFloat()) }
                     Slider(
-                        value = settings.sensorCadenceSec.toFloat(),
-                        onValueChange = { viewModel.updateSensorCadence(it.toInt()) },
+                        value = editableCadence,
+                        onValueChange = { editableCadence = it },
+                        onValueChangeFinished = { viewModel.updateSensorCadence(editableCadence.toInt()) },
                         valueRange = 1f..10f,
                         steps = 8,
                         modifier = Modifier.fillMaxWidth()

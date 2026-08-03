@@ -126,6 +126,7 @@ unsigned long lastAutoSensorRead[4] = {0, 0, 0, 0};
 // for the dashboard; opening the calibration sheet forces a 1s realtime stream.
 const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
 bool calibrationStreamActive = false;
+bool telemetryPaused = false;
 unsigned long lastSensorSent = 0;
 // Set by the WS command handler (AsyncTCP task) to ask loop() to run the heavy
 // broadcastTelemetry() on the main loop stack instead of the small async task
@@ -550,7 +551,16 @@ void saveMotorConfig(int id) {
     size_t written = preferences.putBytes(key, &motorConfigs[id-1], sizeof(MotorSettings));
     preferences.end();
     if (written == 0) Serial.printf("[NVS] WARNING: write failed for Pump %d\n", id);
-    else Serial.printf("[%s] [NVS] Saved Pump %d configuration\n", getLocalTimeStr(), id);
+    else {
+        MotorSettings &c = motorConfigs[id-1];
+        Serial.printf("[%s] [NVS] Pump %d saved: enabled=%d auto=%d amount=%dml "
+            "threshold=%d%% interval=%dh rate=%dml/s dry=%d wet=%d "
+            "max_run=%dmin stop_disc=%d sched=%d v%d lm=%lu\n",
+            getLocalTimeStr(), id, c.isEnabled, c.autoMode, c.amountMl,
+            c.moistureThreshold, c.minIntervalHours, c.mlPerSecond,
+            c.calibrationDry, c.calibrationWet, c.maxRuntimeMinutes,
+            c.stopOnDisconnect, c.scheduleCount, c.version, c.lastModified);
+    }
 }
 
 void loadConfigs() {
@@ -786,7 +796,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         if (seconds < 1) seconds = 1;
         if (seconds > 30) seconds = 30;
         streamCadenceMs = (unsigned long)seconds * 1000UL;
-        Serial.printf("[%s] [SYNC] Stream cadence set to %ds\n", getLocalTimeStr(), seconds);
+        Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums)\n", getLocalTimeStr(), seconds, streamCadenceMs);
         respDoc.clear();
         JsonDocument &okDoc = respDoc;
         okDoc["type"] = "ok";
@@ -802,6 +812,19 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     } else if (cmd == "CAL_STREAM_OFF") {
         calibrationStreamActive = false;
         Serial.println("[SENSOR] Calibration streaming OFF");
+        buildOkResponse(cmd, false);
+        sendWsRaw(client, respBuf);
+    } else if (cmd == "TELEMETRY_PAUSE") {
+        telemetryPaused = true;
+        Serial.println("[SYNC] Telemetry paused (app backgrounded)");
+        buildOkResponse(cmd, false);
+        sendWsRaw(client, respBuf);
+    } else if (cmd == "TELEMETRY_RESUME") {
+        telemetryPaused = false;
+        Serial.println("[SYNC] Telemetry resumed (app foregrounded)");
+        // Force an immediate telemetry push so the app gets fresh data right away.
+        lastSensorSent = 0;
+        pendingSensorRead = true;
         buildOkResponse(cmd, false);
         sendWsRaw(client, respBuf);
     } else if (cmd == "STATUS") {
@@ -959,22 +982,32 @@ void setupApi() {
 
             int newVersion = m["version"];
             unsigned long incomingLastModified = m["last_modified"] | 0UL;
-            // Two-way sync rule: apply when the incoming config is newer by
-            // version OR timestamp; otherwise keep the stored (newer) config.
-            if (newVersion > motorConfigs[idx].version || newVersion == 0 ||
-                incomingLastModified > motorConfigs[idx].lastModified) {
-                const char* mode = m["mode"];
-                motorConfigs[idx].isEnabled = (strcmp(mode, "off") != 0);
-                motorConfigs[idx].autoMode = (strcmp(mode, "auto") == 0);
-                motorConfigs[idx].amountMl = constrain((int)m["amount_ml"], 0, MAX_WATERING_ML);
-                motorConfigs[idx].moistureThreshold = constrain((int)m["threshold"], 0, 100);
-                motorConfigs[idx].minIntervalHours = max((int)m["min_interval_hours"], 0);
-                motorConfigs[idx].lastAutoWaterEpoch = m["last_watered"] | 0UL;
-                motorConfigs[idx].version = newVersion;
-                motorConfigs[idx].lastModified = incomingLastModified;
-                motorConfigs[idx].mlPerSecond = constrain((int)m["ml_per_sec"] | DEFAULT_ML_PER_SECOND, 0, MAX_ML_PER_SECOND);
-                motorConfigs[idx].maxRuntimeMinutes = max((int)m["max_runtime_minutes"] | 1, 0);
-                motorConfigs[idx].stopOnDisconnect = m["stop_on_disconnect"] | false;
+                // Two-way sync rule: apply when the incoming config is newer by
+                // version OR timestamp; otherwise keep the stored (newer) config.
+                if (newVersion > motorConfigs[idx].version || newVersion == 0 ||
+                    incomingLastModified > motorConfigs[idx].lastModified) {
+                    const char* mode = m["mode"];
+                    motorConfigs[idx].isEnabled = (strcmp(mode, "off") != 0);
+                    motorConfigs[idx].autoMode = (strcmp(mode, "auto") == 0);
+                    motorConfigs[idx].amountMl = constrain((int)m["amount_ml"], 0, MAX_WATERING_ML);
+                    motorConfigs[idx].moistureThreshold = constrain((int)m["threshold"], 0, 100);
+                    motorConfigs[idx].minIntervalHours = max((int)m["min_interval_hours"], 0);
+                    motorConfigs[idx].lastAutoWaterEpoch = m["last_watered"] | 0UL;
+                    motorConfigs[idx].version = newVersion;
+                    motorConfigs[idx].lastModified = incomingLastModified;
+                    int newRate = constrain((int)m["ml_per_sec"] | DEFAULT_ML_PER_SECOND, 0, MAX_ML_PER_SECOND);
+                    int newMaxRun = max((int)m["max_runtime_minutes"] | 1, 0);
+                    bool newStopDisc = m["stop_on_disconnect"] | false;
+                    // Log individual field changes
+                    if (newRate != motorConfigs[idx].mlPerSecond)
+                        Serial.printf("[%s] [SYNC] Pump %d ml_per_sec: %d → %d\n", getLocalTimeStr(), id, motorConfigs[idx].mlPerSecond, newRate);
+                    if (newMaxRun != motorConfigs[idx].maxRuntimeMinutes)
+                        Serial.printf("[%s] [SYNC] Pump %d max_runtime: %d → %d min\n", getLocalTimeStr(), id, motorConfigs[idx].maxRuntimeMinutes, newMaxRun);
+                    if (newStopDisc != motorConfigs[idx].stopOnDisconnect)
+                        Serial.printf("[%s] [SYNC] Pump %d stop_on_disconnect: %d → %d\n", getLocalTimeStr(), id, motorConfigs[idx].stopOnDisconnect, newStopDisc);
+                    motorConfigs[idx].mlPerSecond = newRate;
+                    motorConfigs[idx].maxRuntimeMinutes = newMaxRun;
+                    motorConfigs[idx].stopOnDisconnect = newStopDisc;
 
                 JsonArray schedules = m["schedules"];
                 motorConfigs[idx].scheduleCount = min((int)schedules.size(), 5);
@@ -985,6 +1018,15 @@ void setupApi() {
                     motorConfigs[idx].schedules[i].minute = constrain(mn, 0, 59);
                 }
                 saveMotorConfig(id);
+                Serial.printf("[%s] [SYNC] Pump %d updated: mode=%s amount=%dml threshold=%d%% "
+                    "interval=%dh rate=%dml/s cal_dry=%d cal_wet=%d max_runtime=%dmin "
+                    "stop_on_disc=%d sched=%d v%d\n",
+                    getLocalTimeStr(), id, mode, motorConfigs[idx].amountMl,
+                    motorConfigs[idx].moistureThreshold, motorConfigs[idx].minIntervalHours,
+                    motorConfigs[idx].mlPerSecond, motorConfigs[idx].calibrationDry,
+                    motorConfigs[idx].calibrationWet, motorConfigs[idx].maxRuntimeMinutes,
+                    motorConfigs[idx].stopOnDisconnect, motorConfigs[idx].scheduleCount,
+                    motorConfigs[idx].version);
                 updated.add(id);
             } else {
                 ignored.add(id);
@@ -1043,6 +1085,14 @@ void setupApi() {
     for (int m = 1; m <= 4; m++) {
         char path[32]; sprintf(path, "/api/motor/%d/water_now", m);
         server.on(path, HTTP_POST, [m](AsyncWebServerRequest *request){
+            int rate = 0;
+            if (request->hasParam("rate")) {
+                rate = request->getParam("rate")->value().toInt();
+            }
+            if (rate > 0 && rate <= MAX_ML_PER_SECOND) {
+                motorConfigs[m-1].mlPerSecond = rate;
+                Serial.printf("[%s] [PUMP] Rate override for Pump %d → %d ml/s\n", getLocalTimeStr(), m, rate);
+            }
             requestPumpStart(m-1, motorConfigs[m-1].amountMl, "manual");
             request->send(200, "application/json", "{\"status\":\"ok\"}");
         });
@@ -1112,6 +1162,12 @@ void setup() {
                 getLocalTimeStr(), client->remoteIP().toString().c_str(), ws.count(), ESP.getFreeHeap());
             client->text("PlantPilot Ready");
             Serial.println("[WS] TX: PlantPilot Ready");
+            // Server-side keepalive: send WS ping frames every 5 s so the
+            // TCP link stays alive through brief power-rail glitches caused
+            // by relay switching during watering.
+            client->keepAlivePeriod(5);
+            // New client always gets telemetry, regardless of pause state.
+            telemetryPaused = false;
             // Include full per-motor config in the first telemetry frame so a
             // freshly connected app gets device state without a separate request.
             motorsLastSentMs = 0;
@@ -1134,6 +1190,9 @@ void setup() {
             cmd.reserve(len);
             for (size_t i = 0; i < len; i++) cmd += (char)data[i];
             if (cmd.length() > 0) handleWsCommand(cmd, client);
+        } else if (type == WS_EVT_ERROR) {
+            Serial.printf("[%s] [WS] ERROR: code=%d, client=%u\n",
+                getLocalTimeStr(), (int)(intptr_t)arg, client->id());
         }
     });
     server.addHandler(&ws); server.begin();
@@ -1196,20 +1255,9 @@ void loop() {
     }
     if (WiFi.getMode() & WIFI_AP_STA) dnsServer.processNextRequest();
 
-    // Evicted-client detection: cleanupClients() drops clients that have been
-    // closed or timed out. Log when a client disappears without a clean WS
-    // disconnect so a silent link drop is visible in serial.
-    {
-        static unsigned lastClientCount = 0;
-        unsigned before = ws.count();
-        ws.cleanupClients();
-        unsigned after = ws.count();
-        if (lastClientCount > 0 && before > after) {
-            Serial.printf("[%s] [WS] Stale client evicted (was: %u, now: %u)\n",
-                getLocalTimeStr(), before, after);
-        }
-        lastClientCount = after;
-    }
+    // Clean up dead TCP clients (only removes already-disconnected sockets,
+    // does not timeout alive connections).
+    ws.cleanupClients();
 
     // Low-heap guard: logs once per threshold crossing so the serial shows
     // degradation (fragmentation / leak) before any send path can fail.
@@ -1235,7 +1283,7 @@ void loop() {
     static unsigned long lastTele = 0;
     unsigned long telemetryMs = calibrationStreamActive ? 1000UL
                     : (ws.count() > 0 ? streamCadenceMs : 60000UL);
-    if (pendingSensorRead || (loopStart - lastTele > telemetryMs)) {
+    if (!telemetryPaused && (pendingSensorRead || (loopStart - lastTele > telemetryMs))) {
         // READ_SENSORS from the WS handler defers the heavy JSON build to here,
         // on the main loop stack. Also reset the timer so the forced push isn't
         // immediately followed by a regular cadence push.

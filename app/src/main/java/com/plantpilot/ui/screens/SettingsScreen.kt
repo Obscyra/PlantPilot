@@ -279,10 +279,12 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
+                    var editableThreshold by remember(deviceState.lowWaterThreshold) { mutableFloatStateOf(deviceState.lowWaterThreshold.toFloat()) }
                     Slider(
-                        value = deviceState.lowWaterThreshold.toFloat(),
-                        onValueChange = { threshold ->
-                            viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = threshold.toInt()) }
+                        value = editableThreshold,
+                        onValueChange = { editableThreshold = it },
+                        onValueChangeFinished = {
+                            viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = editableThreshold.toInt()) }
                         },
                         valueRange = 0f..4f,
                         steps = 3,

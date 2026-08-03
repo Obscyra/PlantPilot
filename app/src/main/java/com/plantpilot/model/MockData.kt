@@ -79,7 +79,8 @@ object MockData {
         waterTankLevel = 0,
         waterTankSensorValue = 0,
         tankCapacityMl = 5000,
-        lowWaterThreshold = 1
+        lowWaterThreshold = 1,
+        estimatedWaterMl = 5000
     )
 
     fun defaultSettings() = AppSettings(
@@ -87,6 +88,7 @@ object MockData {
         notificationsWateringCompleted = true,
         notificationsScheduleReminders = false,
         useMetricUnits = true,
-        use24HourFormat = false
+        use24HourFormat = false,
+        pumpFlowRateMlPerSec = 10
     )
 }
