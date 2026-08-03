@@ -55,12 +55,21 @@ fun CalibrationScreen(
     viewModel: PlantPilotViewModel,
     onBack: () -> Unit,
 ) {
-    val isConnected by viewModel.isConnected.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val displayConnectionState by viewModel.displayConnectionState.collectAsState()
     val telemetry by viewModel.telemetry.collectAsState()
     val existingCalibration by viewModel.sensorCalibration.collectAsState()
     val existingFlowRate by viewModel.sensorFlowRate.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        viewModel.commandBlockedEvents.collect { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+        }
+    }
 
     // Request the realtime 1s sensor stream while the screen is open, kick off an
     // immediate read, and stop the stream as soon as the screen leaves composition.
@@ -177,7 +186,7 @@ fun CalibrationScreen(
                 },
                 actions = {
                     ConnectionStatusChip(
-                        isConnected = isConnected,
+                        connectionState = displayConnectionState,
                         onClick = {}
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -193,13 +202,13 @@ fun CalibrationScreen(
         ) {
             // Status header
             Row(verticalAlignment = Alignment.CenterVertically) {
-                PulsingDot(isVisible = isConnected)
+                PulsingDot(isVisible = canDisplayLastKnownData)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isConnected) "Live Reading" else "Device Offline",
+                    text = if (canDisplayLastKnownData) "Live Reading" else "Device Offline",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    color = if (canDisplayLastKnownData) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
@@ -224,7 +233,7 @@ fun CalibrationScreen(
             ) {
                 if (terminalLines.isEmpty()) {
                     Text(
-                        text = if (isConnected) "Waiting for telemetry..." else "Device offline",
+                        text = if (canDisplayLastKnownData) "Waiting for telemetry..." else "Device offline",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         color = TerminalPlaceholder
@@ -310,10 +319,10 @@ fun CalibrationScreen(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        PulsingDot(isVisible = liveReading != null && isConnected)
+                        PulsingDot(isVisible = liveReading != null && canDisplayLastKnownData)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isConnected) "Live Reading" else "Device Offline",
+                            text = if (canDisplayLastKnownData) "Live Reading" else "Device Offline",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -486,7 +495,7 @@ fun CalibrationScreen(
                             }
                         }
                     },
-                    enabled = hasUnsavedChanges && isConnected
+                    enabled = hasUnsavedChanges && canSendCommands
                 ) {
                     Text("Save Calibration")
                 }

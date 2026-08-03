@@ -84,5 +84,7 @@ data class AppSettings(
     val notificationsWateringCompleted: Boolean,
     val notificationsScheduleReminders: Boolean,
     val useMetricUnits: Boolean,
-    val use24HourFormat: Boolean
+    val use24HourFormat: Boolean,
+    val maxRuntimeMinutes: Int = 1,
+    val sensorCadenceSec: Int = 3
 )

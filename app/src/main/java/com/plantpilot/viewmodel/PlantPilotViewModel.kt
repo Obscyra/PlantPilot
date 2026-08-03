@@ -6,8 +6,10 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewModelScope
 import com.plantpilot.model.*
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +19,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import com.plantpilot.data.ConnectionState
 import com.plantpilot.data.HardwareEvent
 import com.plantpilot.data.HardwareRepository
 import com.plantpilot.data.NetworkModule
@@ -46,11 +49,54 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     // Single source of truth for ESP32 connectivity: the live WebSocket state,
     // updated by socket callbacks, heartbeat, lifecycle checks and post-action
-    // responses. UI must derive connection state from these flows, never from
+    // responses. UI must derive connection state from this flow, never from
     // cached DeviceState / defaults.
-    val isConnected = hardwareRepository.isConnected
-    val isConnecting = hardwareRepository.isConnecting
+    val connectionState = hardwareRepository.connectionState
+
+    /** Strict: only true when WebSocket is confirmed alive. Guards outbound commands. */
+    val canSendCommands: Boolean
+        get() = connectionState.value == ConnectionState.Connected
+
+    /** Permissive: true when Connected or Reconnecting. Fine for displaying
+     *  last-known data (telemetry, pump states) — the data isn't stale-looking,
+     *  just not live. */
+    val canDisplayLastKnownData: Boolean
+        get() {
+            val s = connectionState.value
+            return s == ConnectionState.Connected || s == ConnectionState.Reconnecting
+        }
+
+    // Delayed-reveal variant of connectionState for display-layer consumers only.
+    // Reconnecting is held back for 500 ms so short-lived reconnects (which
+    // resolve almost instantly on retry) never flash a "Reconnecting" label.
+    // Command guards (canSendCommands / canDisplayLastKnownData) must continue
+    // reading the real connectionState directly — never this.
+    private val _displayConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val displayConnectionState: StateFlow<ConnectionState> = _displayConnectionState.asStateFlow()
+    private var reconnectRevealJob: kotlinx.coroutines.Job? = null
+
+    init {
+        viewModelScope.launch {
+            connectionState.collect { real ->
+                if (real == ConnectionState.Reconnecting) {
+                    reconnectRevealJob?.cancel()
+                    reconnectRevealJob = launch {
+                        delay(500)
+                        _displayConnectionState.value = ConnectionState.Reconnecting
+                    }
+                } else {
+                    reconnectRevealJob?.cancel()
+                    reconnectRevealJob = null
+                    _displayConnectionState.value = real
+                }
+            }
+        }
+    }
     val telemetry = hardwareRepository.telemetry
+
+    /** One-shot event channel for snackbar messages when commands are blocked. */
+    private val _commandBlockedEvents = Channel<String>(Channel.BUFFERED)
+    val commandBlockedEvents = _commandBlockedEvents.receiveAsFlow()
 
     // Per-sensor calibration pulled from the device (sensorId -> (dry, wet)).
     private val _sensorCalibration = MutableStateFlow<Map<Int, Pair<Int, Int>>>(emptyMap())
@@ -112,12 +158,13 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        // Observe connection state (live, no debounce — UI derives directly from isConnected)
+        // Observe connection state (live, no debounce — UI derives directly from connectionState)
         viewModelScope.launch {
-            hardwareRepository.isConnected.collect { isConnected ->
-                val justReconnected = isConnected && !wasPreviouslyConnected
-                wasPreviouslyConnected = isConnected
-                _deviceState.value = _deviceState.value.copy(isConnected = isConnected)
+            hardwareRepository.connectionState.collect { state ->
+                val reachable = state == ConnectionState.Connected || state == ConnectionState.Reconnecting
+                val justReconnected = reachable && !wasPreviouslyConnected
+                wasPreviouslyConnected = reachable
+                _deviceState.value = _deviceState.value.copy(isConnected = reachable)
                 if (justReconnected) {
                     // Two-way sync: pull whatever is newer on the device, push what's newer here.
                     performTwoWaySync()
@@ -212,7 +259,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             while (true) {
                 delay(POLL_INTERVAL_MS)
-                if (!hardwareRepository.isConnected.value) {
+                if (!canDisplayLastKnownData) {
                     val ip = _deviceState.value.deviceIp
                     if (ip.isNotBlank()) {
                         // Silently re-check the ESP32 so the UI recovers as soon as
@@ -250,7 +297,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             isRefreshingDevice = true
             val ok = liveCheck()
             if (ok) {
-                if (!hardwareRepository.isConnected.value) connectToDevice()
+                if (!canDisplayLastKnownData) connectToDevice()
                 performTwoWaySync()
             }
             isRefreshingDevice = false
@@ -265,7 +312,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             isRefreshingDevice = true
             val ok = liveCheck()
-            if (ok && !hardwareRepository.isConnected.value) {
+            if (ok && !canDisplayLastKnownData) {
                 connectToDevice()
             }
             isRefreshingDevice = false
@@ -278,7 +325,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             val ok = liveCheck()
             if (ok) {
-                if (hardwareRepository.isConnected.value) {
+                if (canDisplayLastKnownData) {
                     performTwoWaySync()
                     requestSensorReading()
                 } else {
@@ -354,8 +401,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     },
                     configVersion = dev.version,
                     lastUpdated = dev.last_modified * 1000,
-                    mlPerSec = dev.ml_per_sec ?: it.mlPerSec,
-                    maxRuntimeMinutes = dev.max_runtime_minutes ?: it.maxRuntimeMinutes
+                    mlPerSec = dev.ml_per_sec ?: it.mlPerSec
                 )
             } else it
         }
@@ -448,7 +494,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     /** Pushes a dry/wet calibration for one sensor to the ESP32. */
     fun calibrateSensor(sensorId: Int, dry: Int, wet: Int, mlPerSec: Int? = null, onResult: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch {
-            if (!hardwareRepository.isConnected.value) {
+            if (!canSendCommands) {
+                _commandBlockedEvents.trySend("Can't calibrate — device offline")
                 onResult?.invoke(false)
                 return@launch
             }
@@ -469,20 +516,29 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
      * user sees live raw ADC values; send CAL_STREAM_OFF when it closes.
      */
     fun setCalibrationStreaming(enabled: Boolean) {
-        if (!hardwareRepository.isConnected.value) return
+        if (!canSendCommands) {
+            _commandBlockedEvents.trySend("Can't stream sensor data — device offline")
+            return
+        }
         hardwareRepository.sendCommand(if (enabled) "CAL_STREAM_ON" else "CAL_STREAM_OFF")
     }
 
     /** Asks the ESP32 to read and push the sensors immediately (app open/resume). */
     fun requestSensorReading() {
-        if (!hardwareRepository.isConnected.value) return
+        if (!canSendCommands) {
+            _commandBlockedEvents.trySend("Can't read sensors — device offline")
+            return
+        }
         hardwareRepository.sendCommand("READ_SENSORS")
     }
 
     suspend fun waterPlant(plantId: String): Boolean {
         // Refuse immediately when offline — callers disable the button, and this
         // guards any path that slips through (no click-then-loading-then-fail).
-        if (!hardwareRepository.isConnected.value) return false
+        if (!canSendCommands) {
+            _commandBlockedEvents.trySend("Can't water — device offline")
+            return false
+        }
         val plant = _plants.value.find { it.id == plantId } ?: return false
         
         notificationHelper.showWateringStarted(plant.name)
@@ -562,7 +618,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     version = plant.configVersion,
                     last_modified = plant.lastUpdated / 1000,
                     ml_per_sec = plant.mlPerSec,
-                    max_runtime_minutes = plant.maxRuntimeMinutes,
+                    max_runtime_minutes = settings.value.maxRuntimeMinutes,
                     schedules = plant.schedules
                 )
             }
@@ -596,7 +652,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         isConfigDirty = true
         // Only auto-sync when actually connected; otherwise edits are persisted
         // locally and synced on the next connection.
-        if (autoSync && hardwareRepository.isConnected.value) {
+        if (autoSync && canSendCommands) {
             syncConfigWithDevice()
         }
     }
@@ -652,9 +708,14 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         markConfigDirty(autoSync = true)
     }
 
-    fun updateMaxRuntime(plantId: String, minutes: Int) {
-        updatePlant(plantId) { it.copy(maxRuntimeMinutes = minutes) }
+    fun updateGlobalMaxRuntime(minutes: Int) {
+        updateSettings { it.copy(maxRuntimeMinutes = minutes) }
         markConfigDirty(autoSync = true)
+    }
+
+    fun updateSensorCadence(seconds: Int) {
+        updateSettings { it.copy(sensorCadenceSec = seconds) }
+        HardwareRepository.setStreamCadence(seconds)
     }
 
     fun deletePlant(plantId: String) {
@@ -705,6 +766,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun resetDeviceConfig(onComplete: (Boolean) -> Unit) {
+        if (!canSendCommands) {
+            _commandBlockedEvents.trySend("Can't reset — device offline")
+            onComplete(false)
+            return
+        }
         viewModelScope.launch {
             // 1. Wipe ESP32 NVS config data via WebSocket command
             hardwareRepository.sendCommand("RESET_CONFIG")
@@ -728,7 +794,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun toggleDeviceConnection() {
-        if (hardwareRepository.isConnected.value) {
+        if (canDisplayLastKnownData) {
             disconnectFromDevice()
         } else {
             refreshData()

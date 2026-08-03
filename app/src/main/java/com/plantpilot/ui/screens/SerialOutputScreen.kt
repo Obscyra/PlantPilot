@@ -26,10 +26,13 @@ import com.plantpilot.ui.theme.*
 @Composable
 fun SerialOutputScreen(
     viewModel: PumpTestViewModel = viewModel(),
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onStatusChipClick: () -> Unit = {}
 ) {
-    val isConnected by viewModel.isConnected.collectAsState()
-    val isConnecting by viewModel.isConnecting.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val displayConnectionState by viewModel.displayConnectionState.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
     Scaffold(
@@ -43,9 +46,8 @@ fun SerialOutputScreen(
                 },
                 actions = {
                     ConnectionStatusChip(
-                        isConnected = isConnected,
-                        isConnecting = isConnecting,
-                        onClick = {}
+                        connectionState = displayConnectionState,
+                        onClick = onStatusChipClick
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
@@ -81,9 +83,9 @@ fun SerialOutputScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                PulsingDot(isVisible = isConnected)
+                PulsingDot(isVisible = canDisplayLastKnownData)
                 Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = { viewModel.refreshStatus() }, enabled = isConnected) {
+                TextButton(onClick = { viewModel.refreshStatus() }, enabled = canSendCommands) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Refresh Status", style = MaterialTheme.typography.labelSmall)

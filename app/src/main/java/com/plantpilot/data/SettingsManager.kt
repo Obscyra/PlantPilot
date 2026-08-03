@@ -35,6 +35,8 @@ class SettingsManager(private val context: Context) {
         val ONBOARDING_COMPLETED: Preferences.Key<Boolean> = booleanPreferencesKey("onboarding_completed")
         val PLANTS: Preferences.Key<String> = stringPreferencesKey("plants_config")
         val TELEMETRY_SNAPSHOT: Preferences.Key<String> = stringPreferencesKey("telemetry_snapshot")
+        val MAX_RUNTIME: Preferences.Key<Int> = intPreferencesKey("max_runtime_minutes")
+        val SENSOR_CADENCE: Preferences.Key<Int> = intPreferencesKey("sensor_cadence_sec")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -53,7 +55,9 @@ class SettingsManager(private val context: Context) {
             notificationsWateringCompleted = false, // Deprecated but kept for model compatibility
             notificationsScheduleReminders = false, // Deprecated
             useMetricUnits = prefs[USE_METRIC] ?: true,
-            use24HourFormat = prefs[USE_24H] ?: false
+            use24HourFormat = prefs[USE_24H] ?: false,
+            maxRuntimeMinutes = prefs[MAX_RUNTIME] ?: 1,
+            sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 3
         )
     }
 
@@ -113,6 +117,8 @@ class SettingsManager(private val context: Context) {
             prefs[LOW_WATER_ALERT] = settings.notificationsLowWater
             prefs[USE_METRIC] = settings.useMetricUnits
             prefs[USE_24H] = settings.use24HourFormat
+            prefs[MAX_RUNTIME] = settings.maxRuntimeMinutes
+            prefs[SENSOR_CADENCE] = settings.sensorCadenceSec
         }
     }
 

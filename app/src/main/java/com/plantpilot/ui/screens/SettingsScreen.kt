@@ -36,10 +36,13 @@ fun SettingsScreen(
     onNavigateToPumpTest: () -> Unit,
     onNavigateToCalibration: () -> Unit,
     onNavigateToSerialOutput: () -> Unit,
+    onNavigateToHardwareSettings: () -> Unit = {},
 ) {
     val deviceState by viewModel.deviceState.collectAsState()
     val settings by viewModel.settings.collectAsState()
-    val isConnected by viewModel.isConnected.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
     val telemetry by viewModel.telemetry.collectAsState()
 
     // Field drafts are kept local while editing and only pushed to the ViewModel
@@ -70,6 +73,13 @@ fun SettingsScreen(
     var showDeveloperInfo by remember { mutableStateOf(value = false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        viewModel.commandBlockedEvents.collect { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+        }
+    }
+
     val uriHandler = LocalUriHandler.current
 
     Scaffold(
@@ -154,8 +164,8 @@ fun SettingsScreen(
                     // When offline we never show a cached/placeholder value as if
                     // it were the live status — the field is read-only and shows a
                     // clear "device offline" placeholder instead.
-                    val liveSsid = telemetry?.wifi_ssid?.takeIf { isConnected }
-                        ?: if (isConnected) "Connecting..." else ""
+                    val liveSsid = telemetry?.wifi_ssid?.takeIf { canDisplayLastKnownData }
+                        ?: if (canDisplayLastKnownData) "Connecting..." else ""
 
                     OutlinedTextField(
                         value = liveSsid,
@@ -163,14 +173,14 @@ fun SettingsScreen(
                         readOnly = true,
                         label = { Text("Wi-Fi Network SSID") },
                         placeholder = {
-                            Text(if (isConnected) "Waiting for telemetry..." else "Device offline")
+                            Text(if (canDisplayLastKnownData) "Waiting for telemetry..." else "Device offline")
                         },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Wifi, contentDescription = null) }
                     )
 
-                    if (isConnected) {
+                    if (canDisplayLastKnownData) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -358,6 +368,33 @@ fun SettingsScreen(
                             onCheckedChange = { viewModel.updateSettings { s -> s.copy(use24HourFormat = it) } }
                         )
                     }
+
+                    HorizontalDivider()
+
+                    // Motor & Sensors
+                    Surface(
+                        onClick = onNavigateToHardwareSettings,
+                        color = Color.Transparent,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Motor & Sensors",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
@@ -523,10 +560,10 @@ fun SettingsScreen(
                     var showResetDialog by remember { mutableStateOf(false) }
 
                     Surface(
-                        onClick = { if (isConnected) showResetDialog = true },
+                        onClick = { if (canSendCommands) showResetDialog = true },
                         color = Color.Transparent,
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = isConnected
+                        enabled = canSendCommands
                     ) {
                         Row(
                             modifier = Modifier.padding(16.dp),
@@ -536,14 +573,14 @@ fun SettingsScreen(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isConnected) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant),
+                                    .background(if (canDisplayLastKnownData) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.DeleteForever,
                                     contentDescription = null,
                                     modifier = Modifier.size(22.dp),
-                                    tint = if (isConnected) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = if (canDisplayLastKnownData) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Spacer(modifier = Modifier.width(12.dp))
@@ -552,7 +589,7 @@ fun SettingsScreen(
                                     text = "Factory Reset Config",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isConnected) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (canDisplayLastKnownData) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
@@ -561,7 +598,7 @@ fun SettingsScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            if (!isConnected) {
+                            if (!canDisplayLastKnownData) {
                                 Text("Offline", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                             }
                         }

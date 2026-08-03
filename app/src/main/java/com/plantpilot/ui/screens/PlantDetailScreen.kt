@@ -32,7 +32,9 @@ fun PlantDetailScreen(
 ) {
     val plants by viewModel.plants.collectAsState()
     val settings by viewModel.settings.collectAsState()
-    val isConnected by viewModel.isConnected.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
     val plant = plants.find { it.id == plantId }
 
     if (plant == null) {
@@ -49,7 +51,6 @@ fun PlantDetailScreen(
     var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
     var editableThreshold by remember(plant.moistureThreshold) { mutableFloatStateOf(plant.moistureThreshold.toFloat()) }
     var editableMinInterval by remember(plant.minIntervalHours) { mutableFloatStateOf(plant.minIntervalHours.toFloat()) }
-    var editableMaxRuntime by remember(plant.maxRuntimeMinutes) { mutableFloatStateOf(plant.maxRuntimeMinutes.toFloat()) }
 
     var showScheduleSheet by remember { mutableStateOf(false) }
     var editingSchedule by remember { mutableStateOf<WateringSchedule?>(null) }
@@ -59,6 +60,12 @@ fun PlantDetailScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        viewModel.commandBlockedEvents.collect { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+        }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -410,53 +417,6 @@ fun PlantDetailScreen(
                     }
                 }
             }
-
-            // Max runtime (universal — applies to all modes)
-            ElevatedCard(
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.medium,
-                colors = CardDefaults.elevatedCardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Max Motor Runtime",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Failsafe: motor stops after this duration to prevent flooding",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (editableMaxRuntime.toInt() == 0) "No limit" else "${editableMaxRuntime.toInt()} min",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Slider(
-                        value = editableMaxRuntime,
-                        onValueChange = {
-                            editableMaxRuntime = it
-                            viewModel.updateMaxRuntime(plantId, it.toInt())
-                        },
-                        valueRange = 0f..10f,
-                        steps = 9,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Off", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("10 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
             }
 
             // Action buttons — fixed at bottom, never scrolls
@@ -465,7 +425,7 @@ fun PlantDetailScreen(
                 onClick = { showWaterNowDialog = true },
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.medium,
-                enabled = isConnected
+                enabled = canSendCommands
             ) {
                 Icon(imageVector = Icons.Default.WaterDrop, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -507,7 +467,7 @@ fun PlantDetailScreen(
             onConfirm = {
                 showWaterNowDialog = false
                 // Guard against a connection dropping while the dialog was open.
-                if (isConnected) {
+                if (canSendCommands) {
                     isWatering = true
                     scope.launch {
                         // Fire the actual watering in the background
