@@ -3,21 +3,22 @@
 ## [2.0] - 2026-08-04
 
 ### Added
-- `HardwareConnection` interface and `ConnectionStateHelper` for shared connection logic.
-- `PlantPilotApp` Application class owning repository singletons.
-- `PlantConfigManager` for plant CRUD, schedules, and watering modes.
-- `SyncCoordinator` for two-way sync, config push, and offline event handling.
-- `HistoryManager` for watering history, notifications, and pending-watering completion.
-- `TelemetryProcessor` for telemetry projection, low-water alerts, and snapshot persistence.
+- `HardwareConnection` interface defining the WebSocket connection API for testability.
+- `ConnectionStateHelper` with shared `canSendCommands()`, `canDisplayLastKnownData()`, and `debouncedConnectionState()` replacing duplicated inline logic.
+- `PlantPilotApp` Application class owning `hardwareConnection` and `repository` singletons.
+- `PlantConfigManager` handling plant CRUD, schedule management, watering modes, and `persistPlants()`.
+- `SyncCoordinator` for two-way sync, config push, offline event handling, and `isSyncing`/`isConfigDirty` Compose state.
+- `HistoryManager` for watering history, low-water notifications, and pending-watering completion.
+- `TelemetryProcessor` for telemetry projection, low-water alerts, and debounced snapshot persistence.
 
 ### Changed
-- Converted `HardwareRepository` from object singleton to class implementing `HardwareConnection`.
-- Extracted duplicated connection-state logic (`canSendCommands`, `canDisplayLastKnownData`, `debouncedConnectionState`) into `ConnectionStateHelper`.
-- Refactored `PlantPilotViewModel` (837 → 544 lines) by delegating to four focused manager classes.
-- Updated all UI screens to use `ConnectionStateHelper` instead of inline logic.
+- Converted `HardwareRepository` from `object` singleton to `class` implementing `HardwareConnection` interface.
+- Refactored `PlantPilotViewModel` from ~837 lines to ~350 lines by delegating to four focused manager classes.
+- Updated `MainActivity`, `SyncService`, and `PumpTestViewModel` to access `HardwareRepository` via `PlantPilotApp`.
+- Updated `HomeScreen`, `PlantDetailScreen`, `SettingsScreen`, `SerialOutputScreen`, `CalibrationScreen`, and `PumpTestingScreen` to use `ConnectionStateHelper` instead of inline logic.
 
 ### Fixed
-- Watering disconnect: `HardwareRepository` now sets a 30-second grace period during `waterPlant()` to prevent brief app-side disconnection while the ESP32 relay switches.
+- Watering disconnect: Added `wateringInProgress` flag and 30-second `WATERING_DEBOUNCE_MS` grace period in `HardwareRepository.onConnectionLost()` to prevent brief app-side "Reconnecting" during ESP32 relay switching.
 
 ## [1.0] - 2026-08-03
 
