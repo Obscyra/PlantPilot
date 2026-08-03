@@ -47,6 +47,17 @@ bool pendingRestart = false;
 bool setupModeActive = false;
 
 // --- DATA STRUCTURES ---
+struct HistoryEntry {
+    int motor;
+    int amount;
+    char trigger[12];
+    unsigned long epoch;
+    int moistureAfter;
+    bool isValid;
+};
+HistoryEntry wateringHistory[10];
+int historyWriteIdx = 0;
+
 struct WateringSchedule {
     int hour;
     int minute;
@@ -64,6 +75,7 @@ struct MotorSettings {
     int minIntervalHours; // min hours between auto waterings (0 = no limit)
     WateringSchedule schedules[5];
     int scheduleCount;
+    unsigned long lastAutoWaterEpoch; // Last auto-watering completion (epoch)
 };
 
 struct Relay {
@@ -93,14 +105,35 @@ int rawSoilCache[4] = {0, 0, 0, 0};
 int waterLevel = 100;
 // Epoch of the last completed timed watering per pump; used to enforce the
 // per-plant min auto-water interval. Reset to 0 on boot (no gating until the
-// first completion).
-unsigned long lastAutoWaterEpoch[4] = {0, 0, 0, 0};
+// first completion). Uses millis() for internal robustness against NTP issues.
+unsigned long lastAutoWaterTime[4] = {0, 0, 0, 0};
 
 // Sensor read cadence. Raw ADC readings are only refreshed every 10 minutes
 // for the dashboard; opening the calibration sheet forces a 1s realtime stream.
 const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
 bool calibrationStreamActive = false;
 unsigned long lastSensorSent = 0;
+
+// Staggered pump update state to prevent network blocking and power surges
+struct StartReq {
+    bool pending;
+    int amount;
+    const char* source;
+};
+StartReq startQueue[4] = { {false, 0, ""}, {false, 0, ""}, {false, 0, ""}, {false, 0, ""} };
+unsigned long lastGlobalStart = 0;
+const int STAGGER_INTERVAL_MS = 150;
+
+bool staggeredStopPending = false;
+int nextStaggeredStop = 0;
+unsigned long lastStaggerTime = 0;
+
+void requestPumpStart(int id, int amount, const char* src) {
+    if (id < 0 || id >= 4 || pumps[id].isOn) return;
+    startQueue[id].pending = true;
+    startQueue[id].amount = amount;
+    startQueue[id].source = src;
+}
 
 // Telemetry cadence requested by the app via SYNC_MODE. Foreground -> 1s,
 // background -> 3s, no clients -> 60s. Reset to 3s on boot; the app re-sends
@@ -191,6 +224,7 @@ void broadcastTelemetry() {
         m["min_interval_hours"] = motorConfigs[i].minIntervalHours;
         m["calibration_dry"] = motorConfigs[i].calibrationDry;
         m["calibration_wet"] = motorConfigs[i].calibrationWet;
+        m["last_watered"] = motorConfigs[i].lastAutoWaterEpoch;
         JsonArray sched = m["schedules"].to<JsonArray>();
         for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
             JsonObject s = sched.add<JsonObject>();
@@ -325,6 +359,17 @@ void stopPump(int index) {
     digitalWrite(pumps[index].pin, RELAY_OFF);
     Serial.printf("[%s] [PUMP] %s OFF\n", getLocalTimeStr().c_str(), pumps[index].name);
 
+    int moistureAfter = readMoisture(index);
+
+    // Add to history log (circular buffer)
+    wateringHistory[historyWriteIdx].motor = index + 1;
+    wateringHistory[historyWriteIdx].amount = pumps[index].lastAmountMl;
+    strncpy(wateringHistory[historyWriteIdx].trigger, pumps[index].lastTriggerSource, 11);
+    wateringHistory[historyWriteIdx].epoch = getNow();
+    wateringHistory[historyWriteIdx].moistureAfter = moistureAfter;
+    wateringHistory[historyWriteIdx].isValid = true;
+    historyWriteIdx = (historyWriteIdx + 1) % 10;
+
     // Notify app of completion only for real timed waterings.
     // Diagnostic test toggles (indefinite, amount=0) must NOT emit
     // watering_finished or the app logs a false history entry.
@@ -335,7 +380,7 @@ void stopPump(int index) {
         doc["amount_ml"] = pumps[index].lastAmountMl;
         doc["trigger"] = pumps[index].lastTriggerSource;
         doc["epoch"] = getNow();
-        doc["soil_after"] = readMoisture(index);
+        doc["soil_after"] = moistureAfter;
 
         String msg;
         serializeJson(doc, msg);
@@ -345,7 +390,9 @@ void stopPump(int index) {
     // Record the completion time so auto watering respects minIntervalHours.
     // Only real "auto" waterings gate the next auto trigger.
     if (pumps[index].lastTriggerSource != nullptr && strcmp(pumps[index].lastTriggerSource, "auto") == 0) {
-        lastAutoWaterEpoch[index] = getNow();
+        lastAutoWaterTime[index] = millis();
+        motorConfigs[index].lastAutoWaterEpoch = getNow();
+        saveMotorConfig(index + 1);
     }
 
     pumps[index].startTime = 0;
@@ -432,8 +479,8 @@ void checkSchedules() {
         for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
             WateringSchedule &s = motorConfigs[i].schedules[j];
             if (s.hour == curHr && s.minute == curMin) {
-                Serial.printf("[%s] [SCHED] Triggering %s at %02d:%02d\n", getLocalTimeStr().c_str(), pumps[i].name, curHr, curMin);
-                triggerPump(i, motorConfigs[i].amountMl, "scheduled");
+                Serial.printf("[%s] [SCHED] Queuing %s at %02d:%02d\n", getLocalTimeStr().c_str(), pumps[i].name, curHr, curMin);
+                requestPumpStart(i, motorConfigs[i].amountMl, "scheduled");
                 lastTriggeredMin[i] = curMin;
                 lastTriggeredHour[i] = curHr;
             }
@@ -442,19 +489,33 @@ void checkSchedules() {
 }
 
 void checkAutoWatering() {
+    unsigned long nowMs = millis();
     unsigned long nowEpoch = getNow();
     for (int i = 0; i < 4; i++) {
         if (!motorConfigs[i].isEnabled || !motorConfigs[i].autoMode) continue;
 
-        // Respect the per-plant min auto-water interval (0 = no limit).
-        unsigned long minGap = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
-        if (lastAutoWaterEpoch[i] != 0 && nowEpoch != 0 && (nowEpoch - lastAutoWaterEpoch[i]) < minGap) continue;
+        // Respect the per-plant min auto-water interval.
+        // 0 hours defaults to a 10-second safety gap to prevent rapid loops.
+        unsigned long minGapMs = 10000UL;
+        if (motorConfigs[i].minIntervalHours > 0) {
+            unsigned long minGapSec = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
+
+            // 1. Check persistent epoch (survives reboot)
+            if (nowEpoch != 0 && motorConfigs[i].lastAutoWaterEpoch != 0) {
+                if (nowEpoch - motorConfigs[i].lastAutoWaterEpoch < minGapSec) continue;
+            }
+
+            minGapMs = minGapSec * 1000UL;
+        }
+
+        // 2. Check session-based millis (protects against rapid loops even if NTP is broken)
+        if (lastAutoWaterTime[i] != 0 && (nowMs - lastAutoWaterTime[i]) < minGapMs) continue;
 
         int moisture = readMoisture(i);
         soilMoisture[i] = moisture;
         if (moisture < motorConfigs[i].moistureThreshold) {
-            Serial.printf("[%s] [AUTO] Low moisture on %s: %d%% < %d%%\n", getLocalTimeStr().c_str(), pumps[i].name, moisture, motorConfigs[i].moistureThreshold);
-            triggerPump(i, motorConfigs[i].amountMl, "auto");
+            Serial.printf("[%s] [AUTO] Low moisture on %s: %d%% < %d%%. Queuing start.\n", getLocalTimeStr().c_str(), pumps[i].name, moisture, motorConfigs[i].moistureThreshold);
+            requestPumpStart(i, motorConfigs[i].amountMl, "auto");
         }
     }
 }
@@ -538,13 +599,16 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     } else if (cmd == "STATUS") {
         String status = ""; for (int i = 0; i < 4; i++) status += "Pump" + String(i + 1) + ": " + (pumps[i].isOn ? "ON" : "OFF") + (i < 3 ? "\n" : "");
         client->text(status);
+    } else if (cmd == "RESET_CONFIG") {
+        preferences.begin("plantpilot", false);
+        preferences.clear();
+        preferences.end();
+        Serial.println("[SYSTEM] Configuration Reset requested by App");
+        loadConfigs(); // Re-initialize with defaults
+        client->text("{\"type\":\"ok\",\"cmd\":\"RESET_CONFIG\"}");
     } else if (cmd == "PUMP_ALL_ON") {
-        unsigned long allStart = millis();
-        for (int i = 0; i < 4; i++) {
-            triggerPump(i, 0, "manual");
-            while (millis() - allStart < (unsigned long)(i + 1) * 100) { yield(); }
-        }
-        // Send JSON response with actual pump states
+        for (int i = 0; i < 4; i++) requestPumpStart(i, 0, "manual");
+
         JsonDocument doc;
         doc["type"] = "ok";
         doc["cmd"] = cmd;
@@ -553,7 +617,12 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         String resp; serializeJson(doc, resp);
         client->text(resp);
     } else if (cmd == "PUMP_ALL_OFF") {
-        for (int i = 0; i < 4; i++) stopPump(i);
+        staggeredStopPending = true;
+        nextStaggeredStop = 0;
+        lastStaggerTime = 0;
+        // Clear any pending starts if we are doing a master stop
+        for (int i = 0; i < 4; i++) startQueue[i].pending = false;
+
         JsonDocument doc;
         doc["type"] = "ok";
         doc["cmd"] = cmd;
@@ -564,7 +633,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     } else if (cmd.startsWith("PUMP") && cmd.endsWith("_ON")) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
-        if (id >= 0 && id < 4) triggerPump(id, 0, "manual");
+        if (id >= 0 && id < 4) requestPumpStart(id, 0, "manual");
         JsonDocument doc;
         doc["type"] = "ok";
         doc["cmd"] = cmd;
@@ -572,7 +641,8 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
         String resp; serializeJson(doc, resp);
         client->text(resp);
-    } else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
+    }
+else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
         if (id >= 0 && id < 4) stopPump(id);
@@ -617,6 +687,7 @@ void setupApi() {
             m["min_interval_hours"] = motorConfigs[i].minIntervalHours;
             m["calibration_dry"] = motorConfigs[i].calibrationDry;
             m["calibration_wet"] = motorConfigs[i].calibrationWet;
+            m["last_watered"] = motorConfigs[i].lastAutoWaterEpoch;
             JsonArray sched = m["schedules"].to<JsonArray>();
             for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
                 JsonObject s = sched.add<JsonObject>();
@@ -645,6 +716,21 @@ void setupApi() {
         JsonArray updated = response["updated"].to<JsonArray>();
         JsonArray ignored = response["ignored"].to<JsonArray>();
 
+        // Include the recent history in every sync response so the app can catch
+        // up on events that happened while it was closed.
+        JsonArray history = response["history"].to<JsonArray>();
+        for (int i = 0; i < 10; i++) {
+            int idx = (historyWriteIdx + 9 - i) % 10; // Newest first
+            if (wateringHistory[idx].isValid && wateringHistory[idx].amount > 0) {
+                JsonObject entry = history.add<JsonObject>();
+                entry["motor"] = wateringHistory[idx].motor;
+                entry["amount_ml"] = wateringHistory[idx].amount;
+                entry["trigger"] = wateringHistory[idx].trigger;
+                entry["epoch"] = wateringHistory[idx].epoch;
+                entry["soil_after"] = wateringHistory[idx].moistureAfter;
+            }
+        }
+
         for (JsonObject m : motors) {
             int id = m["id"];
             int idx = id - 1;
@@ -663,6 +749,7 @@ void setupApi() {
                 motorConfigs[idx].amountMl = m["amount_ml"];
                 motorConfigs[idx].moistureThreshold = m["threshold"];
                 motorConfigs[idx].minIntervalHours = max((int)m["min_interval_hours"], 0);
+                motorConfigs[idx].lastAutoWaterEpoch = m["last_watered"] | 0UL;
                 motorConfigs[idx].version = newVersion;
                 motorConfigs[idx].lastModified = incomingLastModified;
 
@@ -710,7 +797,7 @@ void setupApi() {
     for (int m = 1; m <= 4; m++) {
         char path[32]; sprintf(path, "/api/motor/%d/water_now", m);
         server.on(path, HTTP_POST, [m](AsyncWebServerRequest *request){
-            triggerPump(m-1, motorConfigs[m-1].amountMl, "manual");
+            requestPumpStart(m-1, motorConfigs[m-1].amountMl, "manual");
             request->send(200, "application/json", "{\"status\":\"ok\"}");
         });
     }
@@ -755,6 +842,27 @@ void setup() {
 void loop() {
     unsigned long nowMs = millis();
     updateStatusLed();
+
+    // 1. Process Global Start Queue (Power Safety - Non-blocking)
+    if (!staggeredStopPending && (nowMs - lastGlobalStart >= STAGGER_INTERVAL_MS)) {
+        for (int i = 0; i < 4; i++) {
+            if (startQueue[i].pending) {
+                triggerPump(i, startQueue[i].amount, startQueue[i].source);
+                startQueue[i].pending = false;
+                lastGlobalStart = nowMs;
+                break; // Only start one per interval
+            }
+        }
+    }
+
+    // 2. Process Manual Staggered Stop (UI Smoothness)
+    if (staggeredStopPending && (nowMs - lastStaggerTime >= STAGGER_INTERVAL_MS)) {
+        stopPump(nextStaggeredStop);
+        nextStaggeredStop++;
+        lastStaggerTime = nowMs;
+        if (nextStaggeredStop >= 4) staggeredStopPending = false;
+    }
+
     if (pendingRestart && nowMs >= restartTime) ESP.restart();
     if (WiFi.status() == WL_CONNECTED) {
         static unsigned long lastNtpSync = 0;

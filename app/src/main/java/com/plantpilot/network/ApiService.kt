@@ -27,6 +27,7 @@ data class MotorConfig(
     val amount_ml: Int,
     val threshold: Int? = null,
     val min_interval_hours: Int = 0,
+    val last_watered: Long = 0,
     val version: Int = 1,
     val last_modified: Long = 0, // epoch seconds, used for two-way sync
     val schedules: List<WateringSchedule> = emptyList()
@@ -41,7 +42,17 @@ data class SyncRequest(
 @Serializable
 data class SyncResponse(
     val updated: List<Int>,
-    val ignored: List<Int>
+    val ignored: List<Int>,
+    val history: List<DeviceWateringEvent>? = null
+)
+
+@Serializable
+data class DeviceWateringEvent(
+    val motor: Int,
+    val amount_ml: Int,
+    val trigger: String,
+    val epoch: Long,
+    val soil_after: Int? = null
 )
 
 @Serializable
@@ -76,6 +87,7 @@ data class DeviceMotorConfig(
     val min_interval_hours: Int? = null,
     val calibration_dry: Int? = null,
     val calibration_wet: Int? = null,
+    val last_watered: Long? = null,
     val schedules: List<DeviceSchedule> = emptyList()
 )
 

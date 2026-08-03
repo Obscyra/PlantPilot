@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -124,7 +125,11 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
 
         Scaffold(
             bottomBar = {
-                if (showBottomBar) {
+                AnimatedVisibility(
+                    visible = showBottomBar,
+                    enter = fadeIn(tween(400)) + slideInVertically(tween(400)) { it },
+                    exit = fadeOut(tween(400)) + slideOutVertically(tween(400)) { it }
+                ) {
                     NavigationBar {
                         bottomNavItems.forEach { item ->
                             NavigationBarItem(
@@ -150,15 +155,21 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                     }
                 }
             }
-        ) { paddingValues ->
-                NavHost(
+        ) { scaffoldPadding ->
+            val bottomPadding by animateDpAsState(
+                targetValue = if (showBottomBar) scaffoldPadding.calculateBottomPadding() else 0.dp,
+                animationSpec = tween(400),
+                label = "nav_host_bottom_padding"
+            )
+
+            NavHost(
                 navController = navController,
                 startDestination = Screen.Home.route,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(
                         top = 0.dp,
-                        bottom = paddingValues.calculateBottomPadding()
+                        bottom = bottomPadding
                     ),
                 enterTransition = {
                     val initialRoute = initialState.destination.route
@@ -294,6 +305,9 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                         },
                         onNavigateToCalibration = {
                             navController.navigate(Screen.Calibration.route)
+                        },
+                        onNavigateToSerialOutput = {
+                            navController.navigate(Screen.SerialOutput.route)
                         }
                     )
                 }
@@ -301,6 +315,14 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 composable(Screen.Calibration.route) {
                     CalibrationScreen(
                         viewModel = viewModel,
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(Screen.SerialOutput.route) {
+                    val pumpViewModel: PumpTestViewModel = viewModel()
+                    SerialOutputScreen(
+                        viewModel = pumpViewModel,
                         onBack = { navController.popBackStack() }
                     )
                 }

@@ -68,7 +68,7 @@ class SyncService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(getString(R.string.sync_service_title))
             .setContentText(getString(R.string.sync_service_text))
             .setContentIntent(contentIntent)
