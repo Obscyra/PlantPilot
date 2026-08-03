@@ -47,10 +47,13 @@
 ### Firmware
 - Drives a **4-channel active-low relay board** (4 water pumps).
 - Per-pump soil moisture sensing via analog ADC.
-- **STA mode** with **SoftAP captive-portal setup** fallback (`PlantPilot-Setup`).
+- **STA mode** with **SoftAP captive-portal setup** fallback (`PlantPilot-Setup`, random 8-char password printed to Serial).
 - **mDNS** hostname `plantpilot` → app connects by default as `http://plantpilot.local/`.
 - NTP time sync (UTC+6) persisted to NVS so schedules survive reboots.
 - Adaptive idle: telemetry every **3s** with a client connected, **60s** when idle, zero reads when nobody is listening.
+- Resilience: WiFi reconnect with escalating radio reset/restart, per-pump configurable `mlPerSecond`, max-runtime failsafe, and `stopOnDisconnect`.
+- Full **Serial diagnostics**: boot logs reset reason + free heap; every WS command echoed as `[WS] RX` / `[WS] TX` so the Arduino IDE monitor matches the app's Serial Output screen.
+- Command safety: heavy telemetry builds run on the main loop stack (not the AsyncTCP task), and STATUS replies use a fixed buffer.
 
 ---
 
@@ -92,14 +95,14 @@ Soil moisture raw ADC is 12-bit (0–4095); the firmware maps `map(raw, 4095, 10
    - `ESPAsyncWebServer` + `AsyncTCP`
    - `ArduinoJson`
    - (Built-ins used: `WiFi`, `Preferences`, `ESPmDNS`, `DNSServer`, `time`)
-3. Open [`firmware/PlantPilot_ESP32_Test.ino`](firmware/PlantPilot_ESP32_Test.ino), select your ESP32 board/port, and flash.
+3. Open [`firmware/PlantPilot_ESP32.ino`](firmware/PlantPilot_ESP32.ino), select your ESP32 board/port, and flash.
 4. On first boot the device opens a **SoftAP** `PlantPilot-Setup`:
    - Connect your phone/PC to that Wi-Fi network.
    - A captive-portal page opens asking for your Wi-Fi SSID/password (or visit `http://192.168.4.1/`).
    - Once connected, the device joins your network as **`plantpilot.local`**.
 5. Optional firmware tweaks (top of file):
    - `SETUP_SSID` — SoftAP network name.
-   - `ML_PER_SECOND` — pump flow rate used to compute watering durations.
+   - `DEFAULT_ML_PER_SECOND` / `MAX_ML_PER_SECOND` — pump flow rate fallback + sanity cap (per-pump rates are configurable from the app).
    - `GMT_OFFSET_SEC` / `NTP_SERVER` — time source.
 
 > **mDNS note:** the app defaults to `plantpilot.local`. If your network doesn't support mDNS, enter the device's IP manually in Settings → Device.
@@ -141,14 +144,18 @@ Messages from the app (commands):
 | Command | Meaning |
 |---|---|
 | `STATUS` | Request current pump states |
+| `READ_SENSORS` | Force an immediate sensor read + telemetry push |
+| `SYNC_MODE <sec>` | Set telemetry cadence (app lifecycle: 1s foreground / 3s background, clamped 1–30) |
+| `CAL_STREAM_ON` / `CAL_STREAM_OFF` | Toggle real-time calibration sensor streaming (1s) |
 | `PUMP{A–D}_ON` / `PUMP{A–D}_OFF` | Toggle a single pump (letter-based) |
 | `PUMP_ALL_ON` / `PUMP_ALL_OFF` | Toggle all pumps |
+| `RESET_CONFIG` | Wipe NVS config back to defaults |
 
 Messages from the device:
 
 | Type | Payload | Purpose |
 |---|---|---|
-| `telemetry` | water level, soil %, raw soil, RSSI/SSID, uptime, heap, epoch, pump states | Live readings |
+| `telemetry` | water level, soil %, raw soil, RSSI/SSID, uptime, heap, epoch, pump states, full per-motor config (`motors[]`) | Live readings + config sync |
 | `ok` | `cmd` echo + `pumps: [bool × 4]` | ACK carrying the **actual** firmware pump state |
 | `watering_finished` | plant, motor, amount, moisture before/after | History entries (only for real timed waterings) |
 
@@ -177,7 +184,7 @@ Messages from the device:
 | **Home** | Plant overview, water tank indicator (+ low-water message), connection chip/dialog |
 | **Plants** | Plant list / empty state; plant detail: name, amounts, schedules, water-now |
 | **History** | Real-time list of completed watering events |
-| **Settings** | Device connection & setup, app preferences, diagnostics (pump testing, sensor calibration) |
+| **Settings** | Device connection & setup, app preferences, hardware settings (max pump runtime, sensor cadence), diagnostics (pump testing, sensor calibration) |
 | **Hardware Diagnostics** | IP field, connect/disconnect, RSSI/heap/uptime/time card, all-pumps master switch, 4 pump toggles, terminal-style communication log |
 | **Onboarding** | First-run intro (re-triggerable from Settings) |
 
@@ -188,7 +195,7 @@ Messages from the device:
 ```
 PlantPilot/
 ├── firmware/
-│   └── PlantPilot_ESP32_Test.ino      # Relays, sensors, WS, schedules, SoftAP setup
+│   └── PlantPilot_ESP32.ino      # Relays, sensors, WS, schedules, SoftAP setup
 ├── app/
 │   └── src/main/
 │       ├── java/com/plantpilot/
@@ -215,7 +222,7 @@ PlantPilot/
 ## Status & Roadmap
 
 **Working today:**
-- WebSocket + REST networking, connection handling with auto-reconnect & heartbeat.
+- WebSocket + REST networking, state-machine connection handling with exponential backoff, auto-reconnect, and heartbeat.
 - Configuration sync, scheduling, auto-watering, manual watering.
 - Real-time history persistence, low-water notifications.
 - Pump hardware diagnostics terminal.

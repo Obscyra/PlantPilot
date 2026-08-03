@@ -22,12 +22,23 @@ Real-time comms = OkHttp WebSocket; config sync / water-now = Retrofit REST.
   is the single source of truth for connectivity (`isConnected`/`isConnecting`
   StateFlows). Views derive connection state from these, never from cached
   `_deviceState`/mocks.
-- Connection resilience: fixed 2s retry (`RETRY_DELAY_MS`, no backoff),
-  `_isConnecting` true only inside `openSocket()` (so the chip shows
-  "Disconnected" during the retry wait), OkHttp `pingInterval(20s)` keepalive,
-  and a heartbeat that sends `STATUS` every 5s but only force-closes
-  ("ESP32 not responding") after `MAX_MISSED_PROBES` (3) consecutive unanswered
-  probes — a slow-but-alive link is never aggressively torn down.
+- Connection state is a sealed class (`ConnectionState`) with five states:
+  `Connected`, `Connecting`, `Reconnecting`, `Disconnected`, `Failed`. Views
+  derive state from the single `connectionState` StateFlow. Command guards read
+  `connectionState` directly; visual consumers read `displayConnectionState`,
+  which delays `Reconnecting` by 500ms so the chip doesn't flash during short
+  glitches.
+- Command guards: `canSendCommands = state == Connected` (strict);
+  `canDisplayLastKnownData = Connected || Reconnecting` (permissive).
+- Reconnect uses exponential backoff: base 2s (`BACKOFF_BASE_MS`), multiplier
+  1.7x (`BACKOFF_MULTIPLIER`), cap 30s (`BACKOFF_MAX_MS`), ±20% jitter
+  (`BACKOFF_JITTER`), max 8 attempts (`MAX_RETRY_ATTEMPTS`) before `Failed`.
+  The debounce before reconnect is `DISCONNECT_DEBOUNCE_MS` (10s) guarded by
+  `disconnectDebounceJob?.isActive` (no boolean flag).
+- Heartbeat sends `STATUS` every `HEARTBEAT_INTERVAL_MS` (5s) but only
+  force-closes ("ESP32 not responding") after `MAX_MISSED_PROBES` (3)
+  consecutive unanswered probes — a slow-but-alive link is never aggressively
+  torn down. Stale sockets are guarded by `isCurrent(webSocket)` identity check.
 - Pump state: read from `ok` ACKs and `STATUS` replies ONLY, not `telemetry`
   frames (telemetry overwrites in-flight toggles). `pumps[]` is 0-indexed but
   app `motorNumber` is 1-indexed.
@@ -48,10 +59,19 @@ Real-time comms = OkHttp WebSocket; config sync / water-now = Retrofit REST.
   live moisture.
 
 ## Firmware
-- `firmware/PlantPilot_ESP32_Test.ino` is the entire firmware (single .ino,
+- `firmware/PlantPilot_ESP32.ino` is the entire firmware (single .ino,
   Arduino IDE: ESPAsyncWebServer, AsyncTCP, ArduinoJson). Not built here;
   the user compiles it in their own Arduino IDE. Keep it single-file
   Arduino-compatible.
+- Heavy work must never run on the AsyncTCP event-task stack: `READ_SENSORS`
+  sets `pendingSensorRead` and `loop()` runs `broadcastTelemetry()` on the main
+  loop stack instead (a stack overflow here was resetting the ESP32 on connect).
+  STATUS replies use a fixed `char[64]` buffer, WS fragment accumulation
+  `cmd.reserve(len)`, and every command is echoed to `[WS] RX`/`[WS] TX`.
+- Boot logs `esp_reset_reason()` via an enum switch (do NOT use
+  `esp_reset_reason_str()` — it's missing on some Arduino cores). The web UI
+  Serial Output screen shows the same RX/TX/SYS/ERR traffic as the Arduino IDE
+  serial monitor.
 
 ## Docs
 - `README.md` is useful but can lag the code (treat code as source of truth).
