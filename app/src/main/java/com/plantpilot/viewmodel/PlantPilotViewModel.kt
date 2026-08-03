@@ -13,10 +13,12 @@ import com.plantpilot.data.HardwareEvent
 import com.plantpilot.data.NetworkModule
 import com.plantpilot.data.SettingsManager
 import com.plantpilot.model.*
+import com.plantpilot.network.DeviceStatusResponse
 import com.plantpilot.util.NotificationHelper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,7 +55,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     // updated by socket callbacks, heartbeat, lifecycle checks and post-action
     // responses. UI must derive connection state from this flow, never from
     // cached DeviceState / defaults.
-    val connectionState = hardwareRepository.connectionState
+    val connectionState: StateFlow<ConnectionState> = hardwareRepository.connectionState
 
     /** Strict: only true when WebSocket is confirmed alive. Guards outbound commands. */
     val canSendCommands: Boolean
@@ -73,11 +75,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     val displayConnectionState: StateFlow<ConnectionState> =
         ConnectionStateHelper.debouncedConnectionState(connectionState, viewModelScope)
 
-    val telemetry = hardwareRepository.telemetry
+    val telemetry: StateFlow<DeviceStatusResponse?> = hardwareRepository.telemetry
 
     /** One-shot event channel for snackbar messages when commands are blocked. */
-    private val _commandBlockedEvents = Channel<String>(Channel.BUFFERED)
-    val commandBlockedEvents = _commandBlockedEvents.receiveAsFlow()
+    private val _commandBlockedEvents: Channel<String> = Channel(Channel.BUFFERED)
+    val commandBlockedEvents: Flow<String> = _commandBlockedEvents.receiveAsFlow()
 
     // Per-sensor calibration pulled from the device (sensorId -> (dry, wet)).
     private val _sensorCalibration = MutableStateFlow<Map<Int, Pair<Int, Int>>>(emptyMap())
@@ -101,8 +103,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     var isRefreshingDevice by mutableStateOf(value = false)
         private set
 
-    val isSyncing get() = syncCoordinator.isSyncing
-    val isConfigDirty get() = syncCoordinator.isConfigDirty
+    val isSyncing: Boolean get() = syncCoordinator.isSyncing
+    val isConfigDirty: Boolean get() = syncCoordinator.isConfigDirty
 
     var showOnboarding by mutableStateOf(value = true)
         private set
@@ -112,7 +114,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     // Watering completion tracking: motorNumber -> Deferred that completes on watering_finished event
     private val pendingWatering = ConcurrentHashMap<Int, CompletableDeferred<Boolean>>()
 
-    private val historyManager = HistoryManager(
+    private val historyManager: HistoryManager = HistoryManager(
         history = _history,
         plants = _plants,
         scope = viewModelScope,
@@ -121,7 +123,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         onWateringFinished = { motor -> pendingWatering.remove(motor)?.complete(true) },
     )
 
-    private val syncCoordinator = SyncCoordinator(
+    private val syncCoordinator: SyncCoordinator = SyncCoordinator(
         plants = _plants,
         sensorCalibration = _sensorCalibration,
         sensorFlowRate = _sensorFlowRate,
@@ -133,14 +135,14 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         persistPlants = { configManager.persistPlants() },
     )
 
-    private val configManager = PlantConfigManager(
+    private val configManager: PlantConfigManager = PlantConfigManager(
         plants = _plants,
         scope = viewModelScope,
         settingsManager = settingsManager,
         markConfigDirty = { autoSync -> syncCoordinator.markConfigDirty(autoSync) },
     )
 
-    private val telemetryProcessor = TelemetryProcessor(
+    private val telemetryProcessor: TelemetryProcessor = TelemetryProcessor(
         deviceState = _deviceState,
         plants = _plants,
         settings = _settings,

@@ -45,26 +45,28 @@ sealed class HardwareEvent {
 }
 
 class HardwareRepository : HardwareConnection {
-    private const val HEARTBEAT_INTERVAL_MS = 5000L
-    // Number of consecutive unanswered heartbeat probes before we assume the
-    // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
-    private const val MAX_MISSED_PROBES = 3
-    // Grace period before flipping to "Disconnected" in the UI. Brief WebSocket
-    // drops (app backgrounding, network hiccup) are invisible if the link
-    // recovers within this window.
-    private const val DISCONNECT_DEBOUNCE_MS = 10000L
-    // Watering briefly glitches the link (relay switching shares the power
-    // rail with the ESP32), so tolerate a longer silence while a watering is
-    // in flight rather than flashing "Reconnecting" mid-watering.
-    private const val WATERING_DEBOUNCE_MS = 30000L
+    companion object {
+        private const val HEARTBEAT_INTERVAL_MS = 5000L
+        // Number of consecutive unanswered heartbeat probes before we assume the
+        // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
+        private const val MAX_MISSED_PROBES = 3
+        // Grace period before flipping to "Disconnected" in the UI. Brief WebSocket
+        // drops (app backgrounding, network hiccup) are invisible if the link
+        // recovers within this window.
+        private const val DISCONNECT_DEBOUNCE_MS = 10000L
+        // Watering briefly glitches the link (relay switching shares the power
+        // rail with the ESP32), so tolerate a longer silence while a watering is
+        // in flight rather than flashing "Reconnecting" mid-watering.
+        private const val WATERING_DEBOUNCE_MS = 30000L
 
-    // Exponential backoff: base 2s, multiplier 1.7x, cap 30s, ±20% jitter.
-    private const val BACKOFF_BASE_MS = 2000L
-    private const val BACKOFF_MULTIPLIER = 1.7
-    private const val BACKOFF_MAX_MS = 30000L
-    private const val BACKOFF_JITTER = 0.2
-    // After this many consecutive failures, stop auto-retrying.
-    private const val MAX_RETRY_ATTEMPTS = 8
+        // Exponential backoff: base 2s, multiplier 1.7x, cap 30s, ±20% jitter.
+        private const val BACKOFF_BASE_MS = 2000L
+        private const val BACKOFF_MULTIPLIER = 1.7
+        private const val BACKOFF_MAX_MS = 30000L
+        private const val BACKOFF_JITTER = 0.2
+        // After this many consecutive failures, stop auto-retrying.
+        private const val MAX_RETRY_ATTEMPTS = 8
+    }
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
