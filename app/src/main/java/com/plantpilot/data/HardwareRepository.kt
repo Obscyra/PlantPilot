@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package com.plantpilot.data
 
 import com.plantpilot.network.DeviceStatusResponse
@@ -11,13 +13,24 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.*
 import okhttp3.*
 import java.util.concurrent.TimeUnit
+import kotlin.math.pow
+import kotlin.random.Random
 import kotlinx.serialization.Serializable
+
+sealed class ConnectionState {
+    object Connected : ConnectionState()
+    object Connecting : ConnectionState()
+    object Reconnecting : ConnectionState()
+    object Disconnected : ConnectionState()
+    object Failed : ConnectionState()
+}
 
 @Serializable
 sealed class HardwareEvent {
@@ -32,11 +45,22 @@ sealed class HardwareEvent {
 }
 
 object HardwareRepository {
-    private const val RETRY_DELAY_MS = 2000L
     private const val HEARTBEAT_INTERVAL_MS = 5000L
     // Number of consecutive unanswered heartbeat probes before we assume the
     // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
     private const val MAX_MISSED_PROBES = 3
+    // Grace period before flipping to "Disconnected" in the UI. Brief WebSocket
+    // drops (app backgrounding, network hiccup) are invisible if the link
+    // recovers within this window.
+    private const val DISCONNECT_DEBOUNCE_MS = 10000L
+
+    // Exponential backoff: base 2s, multiplier 1.7x, cap 30s, ±20% jitter.
+    private const val BACKOFF_BASE_MS = 2000L
+    private const val BACKOFF_MULTIPLIER = 1.7
+    private const val BACKOFF_MAX_MS = 30000L
+    private const val BACKOFF_JITTER = 0.2
+    // After this many consecutive failures, stop auto-retrying.
+    private const val MAX_RETRY_ATTEMPTS = 8
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -68,9 +92,11 @@ object HardwareRepository {
     private var userInitiatedDisconnect = false
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var disconnectDebounceJob: Job? = null
     private var lastMessageTime = 0L
     private var lastHeartbeatSentTime = 0L
     private var missedProbes = 0
+    private var consecutiveFailures = 0
 
     // Tracks when we last sent a pump command to prevent server "ok" messages
     // (which contain the state of all pumps) from clobbering a newer local
@@ -85,11 +111,8 @@ object HardwareRepository {
     private val _logs = MutableSharedFlow<String>(replay = 50, extraBufferCapacity = 50)
     val logs: SharedFlow<String> = _logs
 
-    private val _isConnected = MutableStateFlow(false)
-    val isConnected: StateFlow<Boolean> = _isConnected
-
-    private val _isConnecting = MutableStateFlow(false)
-    val isConnecting: StateFlow<Boolean> = _isConnecting
+    private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     private val _telemetry = MutableStateFlow<DeviceStatusResponse?>(null)
     val telemetry: StateFlow<DeviceStatusResponse?> = _telemetry
@@ -108,23 +131,26 @@ object HardwareRepository {
     val pumpStates: StateFlow<Map<Int, Boolean>> = _pumpStates
 
     fun connect(url: String) {
-        if (url == currentUrl && _isConnected.value) return
+        if (url == currentUrl && _connectionState.value == ConnectionState.Connected) return
         currentUrl = url
         userInitiatedDisconnect = false
+        consecutiveFailures = 0
         cancelReconnect()
+        disconnectDebounceJob?.cancel()
+        disconnectDebounceJob = null
         stopHeartbeat()
         webSocket?.close(1000, "Opening new connection")
         webSocket = null
         clearLogs()
-        _isConnecting.value = true
+        _connectionState.value = ConnectionState.Connecting
         openSocket()
     }
 
     private fun openSocket() {
         val url = currentUrl ?: return
-        // Only advertise "connecting" during the actual socket attempt, so the
-        // UI shows "Disconnected" during the (short) retry wait in between.
-        _isConnecting.value = true
+        if (_connectionState.value != ConnectionState.Connecting) {
+            _connectionState.value = ConnectionState.Reconnecting
+        }
         val request = Request.Builder().url(url).build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             // Ignore callbacks from stale sockets (e.g. after reconnect), so the
@@ -133,8 +159,10 @@ object HardwareRepository {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (!isCurrent(webSocket)) return
-                _isConnecting.value = false
-                _isConnected.value = true
+                disconnectDebounceJob?.cancel()
+                disconnectDebounceJob = null
+                consecutiveFailures = 0
+                _connectionState.value = ConnectionState.Connected
                 lastMessageTime = System.currentTimeMillis()
                 lastHeartbeatSentTime = 0L
                 missedProbes = 0
@@ -153,7 +181,7 @@ object HardwareRepository {
                 lastMessageTime = System.currentTimeMillis()
                 lastHeartbeatSentTime = 0L
                 missedProbes = 0
-                if (!_isConnected.value) _isConnected.value = true
+                if (_connectionState.value != ConnectionState.Connected) _connectionState.value = ConnectionState.Connected
 
                 addLog("ESP32: $text")
                 parseResponse(text)
@@ -179,25 +207,34 @@ object HardwareRepository {
     }
 
     private fun onConnectionLost(message: String) {
-        _isConnected.value = false
-        _isConnecting.value = false
-        _telemetry.value = null
-        resetPumpStates()
         stopHeartbeat()
         addLog(message)
-        if (!userInitiatedDisconnect) {
-            scheduleReconnect()
+        if (disconnectDebounceJob?.isActive == true) return
+        disconnectDebounceJob = scope.launch {
+            delay(DISCONNECT_DEBOUNCE_MS)
+            _telemetry.value = null
+            resetPumpStates()
+            if (userInitiatedDisconnect) {
+                _connectionState.value = ConnectionState.Disconnected
+            } else {
+                consecutiveFailures++
+                if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
+                    _connectionState.value = ConnectionState.Failed
+                    addLog("System: Connection failed after $MAX_RETRY_ATTEMPTS attempts. Tap to retry.")
+                } else {
+                    _connectionState.value = ConnectionState.Reconnecting
+                    scheduleReconnect()
+                }
+            }
         }
     }
 
     private fun scheduleReconnect() {
         cancelReconnect()
-        // While waiting to retry, stop advertising "connecting" so the UI shows a
-        // clear "Disconnected" state instead of an endless spinner.
-        _isConnecting.value = false
-        addLog("System: Retrying connection in ${RETRY_DELAY_MS / 1000}s...")
+        val delayMs = computeBackoffDelay()
+        addLog("System: Retrying connection in ${delayMs / 1000}s...")
         reconnectJob = scope.launch {
-            delay(RETRY_DELAY_MS)
+            delay(delayMs)
             openSocket()
         }
     }
@@ -207,12 +244,20 @@ object HardwareRepository {
         reconnectJob = null
     }
 
+    private fun computeBackoffDelay(): Long {
+        val exponential = BACKOFF_BASE_MS * BACKOFF_MULTIPLIER.pow(consecutiveFailures.toDouble())
+        val capped = exponential.coerceAtMost(BACKOFF_MAX_MS.toDouble())
+        val jitterRange = capped * BACKOFF_JITTER
+        val jitter = Random.nextDouble(-jitterRange, jitterRange)
+        return (capped + jitter).toLong().coerceAtLeast(0)
+    }
+
     private fun startHeartbeat() {
         stopHeartbeat()
         heartbeatJob = scope.launch {
             while (isActive) {
                 delay(HEARTBEAT_INTERVAL_MS)
-                if (!_isConnected.value) continue
+                if (_connectionState.value != ConnectionState.Connected && _connectionState.value != ConnectionState.Reconnecting) continue
                 val now = System.currentTimeMillis()
                 val idle = now - lastMessageTime
                 if (idle >= HEARTBEAT_INTERVAL_MS) {
@@ -238,12 +283,14 @@ object HardwareRepository {
 
     fun disconnect() {
         userInitiatedDisconnect = true
+        consecutiveFailures = 0
         cancelReconnect()
+        disconnectDebounceJob?.cancel()
+        disconnectDebounceJob = null
         stopHeartbeat()
         webSocket?.close(1000, "User disconnect")
         webSocket = null
-        _isConnected.value = false
-        _isConnecting.value = false
+        _connectionState.value = ConnectionState.Disconnected
         _telemetry.value = null
         resetPumpStates()
         addLog("System: Disconnected")
@@ -313,7 +360,7 @@ object HardwareRepository {
     fun setStreamCadence(seconds: Int) {
         requestedCadenceSec = seconds
         val cmd = "SYNC_MODE $seconds"
-        if (webSocket != null && _isConnected.value) {
+        if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
             sendCommand(cmd)
         }
     }

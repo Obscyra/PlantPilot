@@ -29,12 +29,20 @@ fun HomeScreen(
     val plants by viewModel.plants.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val deviceState by viewModel.deviceState.collectAsState()
-    val isConnected by viewModel.isConnected.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
     var isRefreshing by remember { mutableStateOf(value = false) }
     var showWateringSnackbar by remember { mutableStateOf(value = false) }
     var wateringPlantName by remember { mutableStateOf(value = "") }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        viewModel.commandBlockedEvents.collect { message ->
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Short)
+        }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -115,7 +123,7 @@ fun HomeScreen(
                         PlantCard(
                             plant = plant,
                             use24HourFormat = settings.use24HourFormat,
-                            waterEnabled = isConnected,
+                            waterEnabled = canSendCommands,
                             onWaterNow = {
                                 scope.launch {
                                     wateringPlantName = plant.name

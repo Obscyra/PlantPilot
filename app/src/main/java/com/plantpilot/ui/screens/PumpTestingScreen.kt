@@ -33,12 +33,14 @@ import com.plantpilot.ui.components.PulsingDot
 @Composable
 fun PumpTestingScreen(
     viewModel: PumpTestViewModel = viewModel(),
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onStatusChipClick: () -> Unit = {}
 ) {
-    val isConnected by viewModel.isConnected.collectAsState()
-    val isConnecting by viewModel.isConnecting.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val canSendCommands = connectionState == com.plantpilot.data.ConnectionState.Connected
+    val canDisplayLastKnownData = connectionState == com.plantpilot.data.ConnectionState.Connected || connectionState == com.plantpilot.data.ConnectionState.Reconnecting
+    val displayConnectionState by viewModel.displayConnectionState.collectAsState()
     val pumpStates by viewModel.pumpStates.collectAsState()
-    val telemetryData by viewModel.telemetry.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
     val terminalLogs = remember(logs) {
@@ -71,9 +73,8 @@ fun PumpTestingScreen(
                 },
                 actions = {
                     ConnectionStatusChip(
-                        isConnected = isConnected,
-                        isConnecting = isConnecting,
-                        onClick = {}
+                        connectionState = displayConnectionState,
+                        onClick = onStatusChipClick
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
@@ -94,7 +95,7 @@ fun PumpTestingScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // Data activity indicator
-                DataActivityIndicator(isActive = isConnecting || isConnected, isConnecting = isConnecting)
+                DataActivityIndicator(isActive = canDisplayLastKnownData || displayConnectionState == com.plantpilot.data.ConnectionState.Connecting, isConnecting = displayConnectionState == com.plantpilot.data.ConnectionState.Connecting, isReconnecting = displayConnectionState == com.plantpilot.data.ConnectionState.Reconnecting)
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -112,7 +113,7 @@ fun PumpTestingScreen(
                     )
                     FilledTonalIconButton(
                         onClick = { viewModel.refreshStatus() },
-                        enabled = isConnected,
+                        enabled = canSendCommands,
                         modifier = Modifier.size(34.dp)
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
@@ -122,33 +123,29 @@ fun PumpTestingScreen(
                 // Master All Pumps Switch
                 AllPumpsRow(
                     pumpStates = pumpStates,
-                    enabled = isConnected,
+                    enabled = canSendCommands,
                     viewModel = viewModel
                 )
 
                 // Pump Controls - Compact Rows
                 PumpRow(
                     id = 1, icon = Icons.Default.WaterDrop,
-                    isOn = pumpStates[1] ?: false, enabled = isConnected,
-                    rawMoisture = telemetryData?.raw_soil?.getOrNull(0),
+                    isOn = pumpStates[1] ?: false, enabled = canSendCommands,
                     viewModel = viewModel
                 )
                 PumpRow(
                     id = 2, icon = Icons.Default.Spa,
-                    isOn = pumpStates[2] ?: false, enabled = isConnected,
-                    rawMoisture = telemetryData?.raw_soil?.getOrNull(1),
+                    isOn = pumpStates[2] ?: false, enabled = canSendCommands,
                     viewModel = viewModel
                 )
                 PumpRow(
                     id = 3, icon = Icons.Default.Grass,
-                    isOn = pumpStates[3] ?: false, enabled = isConnected,
-                    rawMoisture = telemetryData?.raw_soil?.getOrNull(2),
+                    isOn = pumpStates[3] ?: false, enabled = canSendCommands,
                     viewModel = viewModel
                 )
                 PumpRow(
                     id = 4, icon = Icons.Default.Park,
-                    isOn = pumpStates[4] ?: false, enabled = isConnected,
-                    rawMoisture = telemetryData?.raw_soil?.getOrNull(3),
+                    isOn = pumpStates[4] ?: false, enabled = canSendCommands,
                     viewModel = viewModel
                 )
             }
@@ -186,7 +183,7 @@ fun PumpTestingScreen(
             ) {
                 if (terminalLogs.isEmpty()) {
                     Text(
-                        text = if (isConnected) "Waiting for pump events..." else "Device offline",
+                        text = if (canDisplayLastKnownData) "Waiting for pump events..." else "Device offline",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
                         color = TerminalPlaceholder
@@ -279,7 +276,6 @@ fun PumpRow(
     icon: ImageVector,
     isOn: Boolean,
     enabled: Boolean,
-    rawMoisture: Int?,
     viewModel: PumpTestViewModel
 ) {
     val activeColor = MaterialTheme.colorScheme.primary
@@ -309,16 +305,9 @@ fun PumpRow(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.width(52.dp)
             )
-            if (rawMoisture != null) {
-                Text(
-                    text = "Raw: $rawMoisture",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
-                )
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-            }
+            
+            Spacer(modifier = Modifier.weight(1f))
+            
             Text(
                 if (isOn) "ON" else "OFF",
                 style = MaterialTheme.typography.labelSmall,
@@ -337,7 +326,7 @@ fun PumpRow(
 
 
 @Composable
-fun DataActivityIndicator(isActive: Boolean, isConnecting: Boolean = false) {
+fun DataActivityIndicator(isActive: Boolean, isConnecting: Boolean = false, isReconnecting: Boolean = false) {
     val transition = rememberInfiniteTransition(label = "data_activity")
     val dotCount = 3
     val dots = List(dotCount) { index ->
@@ -371,7 +360,11 @@ fun DataActivityIndicator(isActive: Boolean, isConnecting: Boolean = false) {
             }
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                if (isConnecting) "Connecting..." else "Data active",
+                when {
+                    isConnecting -> "Connecting..."
+                    isReconnecting -> "Reconnecting..."
+                    else -> "Data active"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

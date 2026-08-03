@@ -7,6 +7,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 
 object WifiUtils {
+    @Suppress("DEPRECATION")
     fun getCurrentSsid(context: Context): String {
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val info = wifiManager.connectionInfo
