@@ -197,8 +197,27 @@ unsigned long getNow() {
 static JsonDocument telemetryDoc;
 static char telemetryBuf[2048];
 
+// Logs a throttled status line while no client is connected, so the serial
+// monitor shows the ESP is alive and what it's doing during downtime (the WS
+// telemetry stream is paused when ws.count() == 0, so without this the device
+// would go completely silent).
+void logIdleStatus() {
+    static unsigned long lastIdleLog = 0;
+    unsigned long now = millis();
+    // ~1 line per 30s while disconnected.
+    if (now - lastIdleLog < 30000UL) return;
+    lastIdleLog = now;
+
+    Serial.printf("[%s] [IDLE] wifi=%d (%d dBm) clients=%u soil=%d,%d,%d,%d pumps=%d,%d,%d,%d water=%d heap=%u uptime=%lus\n",
+        getLocalTimeStr(),
+        (int)WiFi.status(), (int)WiFi.RSSI(), ws.count(),
+        soilMoisture[0], soilMoisture[1], soilMoisture[2], soilMoisture[3],
+        pumps[0].isOn, pumps[1].isOn, pumps[2].isOn, pumps[3].isOn,
+        waterLevel, ESP.getFreeHeap(), millis() / 1000);
+}
+
 void broadcastTelemetry() {
-    if (ws.count() == 0) return;
+    if (ws.count() == 0) { logIdleStatus(); return; }
     telemetryDoc.clear();
     JsonDocument &doc = telemetryDoc;
     doc["type"] = "telemetry";
