@@ -56,6 +56,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     private val _sensorCalibration = MutableStateFlow<Map<Int, Pair<Int, Int>>>(emptyMap())
     val sensorCalibration: StateFlow<Map<Int, Pair<Int, Int>>> = _sensorCalibration.asStateFlow()
 
+    // Per-sensor flow rate pulled from the device (sensorId -> mlPerSec).
+    private val _sensorFlowRate = MutableStateFlow<Map<Int, Int>>(emptyMap())
+    val sensorFlowRate: StateFlow<Map<Int, Int>> = _sensorFlowRate.asStateFlow()
+
     private val POLL_INTERVAL_MS = 30_000L
 
     private val _history = MutableStateFlow<List<WateringEvent>>(emptyList())
@@ -309,6 +313,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     if (dry != null && wet != null) dev.id to (dry to wet) else null
                 }.toMap()
                 if (calibration.isNotEmpty()) _sensorCalibration.value = calibration
+                val flowRates = deviceMotors.mapNotNull { dev ->
+                    dev.ml_per_sec?.let { dev.id to it }
+                }.toMap()
+                if (flowRates.isNotEmpty()) _sensorFlowRate.value = flowRates
                 var changed = false
                 deviceMotors.forEach { dev ->
                     if (applyDeviceConfig(dev)) changed = true
@@ -345,7 +353,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                         )
                     },
                     configVersion = dev.version,
-                    lastUpdated = dev.last_modified * 1000
+                    lastUpdated = dev.last_modified * 1000,
+                    mlPerSec = dev.ml_per_sec ?: it.mlPerSec
                 )
             } else it
         }
@@ -436,15 +445,18 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /** Pushes a dry/wet calibration for one sensor to the ESP32. */
-    fun calibrateSensor(sensorId: Int, dry: Int, wet: Int, onResult: ((Boolean) -> Unit)? = null) {
+    fun calibrateSensor(sensorId: Int, dry: Int, wet: Int, mlPerSec: Int? = null, onResult: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch {
             if (!hardwareRepository.isConnected.value) {
                 onResult?.invoke(false)
                 return@launch
             }
-            val result = repository.calibrate(sensorId, dry, wet)
+            val result = repository.calibrate(sensorId, dry, wet, mlPerSec)
             if (result.isSuccess) {
                 _sensorCalibration.value = _sensorCalibration.value + (sensorId to (dry to wet))
+                if (mlPerSec != null) {
+                    _sensorFlowRate.value = _sensorFlowRate.value + (sensorId to mlPerSec)
+                }
             }
             onResult?.invoke(result.isSuccess)
         }
@@ -548,6 +560,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                     last_watered = plant.lastWateredTimestamp / 1000,
                     version = plant.configVersion,
                     last_modified = plant.lastUpdated / 1000,
+                    ml_per_sec = plant.mlPerSec,
                     schedules = plant.schedules
                 )
             }

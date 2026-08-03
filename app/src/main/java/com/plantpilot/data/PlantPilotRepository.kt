@@ -131,9 +131,9 @@ class PlantPilotRepository {
     }
 
     /** Pushes a per-sensor dry/wet calibration to the ESP32. */
-    suspend fun calibrate(motorId: Int, dry: Int, wet: Int): Result<GenericResponse> {
+    suspend fun calibrate(motorId: Int, dry: Int, wet: Int, mlPerSec: Int? = null): Result<GenericResponse> {
         return try {
-            val response = api.calibrate(CalibrationRequest(motor = motorId, dry = dry, wet = wet))
+            val response = api.calibrate(CalibrationRequest(motor = motorId, dry = dry, wet = wet, ml_per_sec = mlPerSec))
             val body = response.body()
             if (response.isSuccessful && body != null && body.status == "ok") {
                 Result.success(body)

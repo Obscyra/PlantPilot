@@ -58,6 +58,7 @@ fun CalibrationScreen(
     val isConnected by viewModel.isConnected.collectAsState()
     val telemetry by viewModel.telemetry.collectAsState()
     val existingCalibration by viewModel.sensorCalibration.collectAsState()
+    val existingFlowRate by viewModel.sensorFlowRate.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -95,6 +96,9 @@ fun CalibrationScreen(
     // Draft map: temporary dry/wet edits per sensor, keyed by sensor index (1–4).
     val draftCalibration = remember { mutableStateMapOf<Int, Pair<Int, Int>>() }
 
+    // Draft map: temporary flow rate edits per sensor, keyed by sensor index (1–4).
+    val draftFlowRate = remember { mutableStateMapOf<Int, Int>() }
+
     var dryValue by remember(selectedSensor) {
         mutableIntStateOf(
             draftCalibration[selectedSensor]?.first
@@ -109,17 +113,30 @@ fun CalibrationScreen(
                 ?: 1400
         )
     }
+    var flowRateValue by remember(selectedSensor) {
+        mutableIntStateOf(
+            draftFlowRate[selectedSensor]
+                ?: existingFlowRate[selectedSensor]
+                ?: 10
+        )
+    }
 
     fun saveDraftForCurrentSensor() {
         draftCalibration[selectedSensor] = dryValue to wetValue
+        draftFlowRate[selectedSensor] = flowRateValue
     }
 
     val hasUnsavedChanges by remember {
         derivedStateOf {
-            draftCalibration.any { (sensor, pair) ->
+            val calChanged = draftCalibration.any { (sensor, pair) ->
                 val saved = existingCalibration[sensor]
                 saved?.first != pair.first || saved?.second != pair.second
             }
+            val flowChanged = draftFlowRate.any { (sensor, rate) ->
+                val saved = existingFlowRate[sensor]
+                saved != rate
+            }
+            calChanged || flowChanged
         }
     }
 
@@ -241,6 +258,9 @@ fun CalibrationScreen(
                             wetValue = draftCalibration[sensor]?.second
                                 ?: existingCalibration[sensor]?.second
                                 ?: 1400
+                            flowRateValue = draftFlowRate[sensor]
+                                ?: existingFlowRate[sensor]
+                                ?: 10
                         },
                         shape = SegmentedButtonDefaults.itemShape(
                             index = sensor - 1,
@@ -252,7 +272,11 @@ fun CalibrationScreen(
                                 val saved = existingCalibration[sensor]
                                 saved?.first != draft.first || saved?.second != draft.second
                             } ?: false
-                            if (hasDraft) {
+                            val hasFlowDraft = draftFlowRate[sensor]?.let { rate ->
+                                val saved = existingFlowRate[sensor]
+                                saved != rate
+                            } ?: false
+                            if (hasDraft || hasFlowDraft) {
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)
@@ -407,6 +431,19 @@ fun CalibrationScreen(
                 )
             }
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Flow rate — full width
+            CalibrationValueField(
+                label = "Flow Rate (ml/s)",
+                value = flowRateValue,
+                onValueChange = {
+                    flowRateValue = it
+                    saveDraftForCurrentSensor()
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+
             Spacer(modifier = Modifier.height(16.dp))
 
             Row(
@@ -423,11 +460,12 @@ fun CalibrationScreen(
                 Button(
                     onClick = {
                         saveDraftForCurrentSensor()
-                        val toSave = draftCalibration.toMap()
+                        val toSaveCal = draftCalibration.toMap()
+                        val toSaveFlow = draftFlowRate.toMap()
                         var allSuccess = true
-                        var remaining = toSave.size
-                        toSave.forEach { (sensor, pair) ->
-                            viewModel.calibrateSensor(sensor, pair.first, pair.second) { success ->
+                        var remaining = toSaveCal.size
+                        toSaveCal.forEach { (sensor, pair) ->
+                            viewModel.calibrateSensor(sensor, pair.first, pair.second, toSaveFlow[sensor]) { success ->
                                 if (!success) allSuccess = false
                                 remaining--
                                 if (remaining == 0) {
@@ -467,16 +505,20 @@ fun CalibrationScreen(
                 TextButton(onClick = {
                     showSaveDialog = false
                     saveDraftForCurrentSensor()
-                    val toSave = draftCalibration.toMap()
+                    val toSaveCal = draftCalibration.toMap()
+                    val toSaveFlow = draftFlowRate.toMap()
                     var allSuccess = true
-                    var remaining = toSave.size
-                    toSave.forEach { (sensor, pair) ->
-                        viewModel.calibrateSensor(sensor, pair.first, pair.second) { success ->
+                    var remaining = toSaveCal.size
+                    toSaveCal.forEach { (sensor, pair) ->
+                        viewModel.calibrateSensor(sensor, pair.first, pair.second, toSaveFlow[sensor]) { success ->
                             if (!success) allSuccess = false
                             remaining--
                             if (remaining == 0) {
                                 scope.launch {
-                                    if (allSuccess) draftCalibration.clear()
+                                    if (allSuccess) {
+                                            draftCalibration.clear()
+                                            draftFlowRate.clear()
+                                        }
                                     snackbarHostState.showSnackbar(
                                         message = if (allSuccess) "All sensors calibrated" else "Some calibrations failed",
                                         duration = SnackbarDuration.Long
@@ -494,6 +536,7 @@ fun CalibrationScreen(
                 TextButton(onClick = {
                     showSaveDialog = false
                     draftCalibration.clear()
+                    draftFlowRate.clear()
                     onBack()
                 }) {
                     Text("Discard")

@@ -30,6 +30,7 @@ data class MotorConfig(
     val last_watered: Long = 0,
     val version: Int = 1,
     val last_modified: Long = 0, // epoch seconds, used for two-way sync
+    val ml_per_sec: Int = 10,
     val schedules: List<WateringSchedule> = emptyList()
 )
 
@@ -88,6 +89,7 @@ data class DeviceMotorConfig(
     val calibration_dry: Int? = null,
     val calibration_wet: Int? = null,
     val last_watered: Long? = null,
+    val ml_per_sec: Int? = null,
     val schedules: List<DeviceSchedule> = emptyList()
 )
 
@@ -100,7 +102,8 @@ data class DeviceConfigResponse(
 data class CalibrationRequest(
     val motor: Int,
     val dry: Int,
-    val wet: Int
+    val wet: Int,
+    val ml_per_sec: Int? = null
 )
 
 interface ApiService {
