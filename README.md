@@ -230,10 +230,10 @@ PlantPilot/
 - Configuration sync, scheduling, auto-watering, manual watering.
 - Real-time history persistence, low-water notifications.
 - Pump hardware diagnostics terminal.
+- Sensor calibration: live raw ADC streaming (`CAL_STREAM_ON/OFF`) with dry/wet persistence to the device over sync.
 
 **In progress / next:**
-- [ ] Sensor calibration: wire real live readings from telemetry into the calibration UI.
-- [ ] Sensor calibration: persist dry/wet calibration values to the device (currently UI-only).
+- [ ] Nothing planned right now — sensor calibration, background sync, and power-saving are all wired end-to-end.
 
 ---
 
