@@ -94,6 +94,7 @@ fun PlantCard(
                     label = {
                         val text = when (plant.wateringMode) {
                             WateringMode.AUTOMATIC -> "Auto · ${plant.moistureThreshold}%"
+                            WateringMode.OFF -> "Off"
                             else -> {
                                 if (plant.schedules.isEmpty()) "No Schedule"
                                 else plant.schedules.joinToString(", ") {
