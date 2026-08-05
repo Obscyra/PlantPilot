@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0] - 2026-08-05
+
+### Fixed
+- Firmware active-low relay startup: Fixed initialization sequence in `initRelays()` so output pins default to `RELAY_OFF` (`HIGH`) on boot without clicking/activating pumps.
+- Firmware DNS server loop check: Fixed bitwise evaluation `WiFi.getMode() & WIFI_AP_STA` to `setupModeActive` so `dnsServer.processNextRequest()` is only called in SoftAP mode.
+- Firmware multi-client WebSocket disconnect: Enclosed `stopOnDisconnect` pump termination in `ws.count() == 0` check to prevent active watering cancellation when secondary socket connections drop.
+- WebSocket URL sanitization: Added `sanitizeWsUrl()` and `updateBaseUrl()` in App to normalize host schemes (`ws://`, `http://`, trailing slashes) and prevent `IllegalArgumentException` crashes.
+- WebSocket message parsing: Added support for `type == "status"` frames in `HardwareRepository` so `"STATUS"` replies update live pump states.
+- Service coroutine leak: Managed single `reconnectJob` reference in `SyncService` and added `cancelChildren()` cleanup in `onDestroy()`.
+- Data synchronization: Added `stop_on_disconnect` to `MotorConfig` payload and updated ESP32 firmware sync parser to preserve existing NVS values when keys are omitted.
+
 ## [2.0] - 2026-08-04
 
 ### Added
