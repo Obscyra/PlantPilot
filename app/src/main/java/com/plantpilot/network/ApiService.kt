@@ -16,6 +16,7 @@ data class DeviceStatusResponse(
     val raw_soil: List<Int>? = null,
     val epoch: Long? = null,
     val pumps: List<Boolean>? = null,
+    val queued: List<Boolean>? = null,
     val motors: List<DeviceMotorConfig>? = null
 )
 
@@ -32,13 +33,15 @@ data class MotorConfig(
     val last_modified: Long = 0, // epoch seconds, used for two-way sync
     val ml_per_sec: Int = 10,
     val max_runtime_minutes: Int = 1,
+    val stop_on_disconnect: Boolean = false,
     val schedules: List<WateringSchedule> = emptyList()
 )
 
 @Serializable
 data class SyncRequest(
     val epoch: Long,
-    val motors: List<MotorConfig>
+    val motors: List<MotorConfig>,
+    val water_level: Int? = null
 )
 
 @Serializable
@@ -114,7 +117,11 @@ interface ApiService {
     suspend fun sync(@Body request: SyncRequest): Response<SyncResponse>
 
     @POST("/api/motor/{id}/water_now")
-    suspend fun waterNow(@Path("id") motorId: Int, @Query("rate") rate: Int? = null): Response<GenericResponse>
+    suspend fun waterNow(
+        @Path("id") motorId: Int,
+        @Query("rate") rate: Int? = null,
+        @Query("amount") amount: Int? = null
+    ): Response<GenericResponse>
 
     @GET("/api/status")
     suspend fun getStatus(): Response<StatusResponse>

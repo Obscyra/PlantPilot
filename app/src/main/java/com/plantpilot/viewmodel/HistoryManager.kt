@@ -8,6 +8,7 @@ import com.plantpilot.network.DeviceWateringEvent
 import com.plantpilot.util.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -17,8 +18,8 @@ import java.util.UUID
  * the coordinator's pending-watering waiters when a finishing event arrives.
  */
 class HistoryManager(
-    private val history: MutableStateFlow<List<WateringEvent>>,
-    private val plants: MutableStateFlow<List<Plant>>,
+    private val historyFlow: MutableStateFlow<List<WateringEvent>>,
+    private val plantsFlow: MutableStateFlow<List<Plant>>,
     private val scope: CoroutineScope,
     private val settingsManager: SettingsManager,
     private val notificationHelper: NotificationHelper,
@@ -26,41 +27,44 @@ class HistoryManager(
     private val onWaterUsed: (amountMl: Int) -> Unit = {},
 ) {
     fun addHistoryEvent(event: WateringEvent) {
-        val updatedHistory = (listOf(event) + history.value).take(50)
-        history.value = updatedHistory
+        historyFlow.update { current -> (listOf(event) + current).take(50) }
+        
         scope.launch {
-            settingsManager.saveHistory(updatedHistory)
+            settingsManager.saveHistory(historyFlow.value)
         }
 
         // Drain the app-tracked tank estimate by the amount actually used.
         onWaterUsed(event.amountMl)
 
         // Also update the plant's last watered timestamp
-        plants.value = plants.value.map {
-            if (it.id == event.plantId) {
-                it.copy(
-                    lastWateredTimestamp = event.timestamp,
-                    currentMoisture = event.moistureAfter ?: it.currentMoisture
-                )
-            } else it
+        plantsFlow.update { currentList ->
+            currentList.map {
+                if (it.id == event.plantId) {
+                    it.copy(
+                        lastWateredTimestamp = event.timestamp,
+                        currentMoisture = event.moistureAfter ?: it.currentMoisture
+                    )
+                } else it
+            }
         }
 
         // Complete any pending watering deferred for this motor
         onWateringFinished(event.motorNumber)
 
         // Show notification if it was a finished event we just received
-        val plant = plants.value.find { it.id == event.plantId }
+        val plant = plantsFlow.value.find { it.id == event.plantId }
         if (plant != null) {
             notificationHelper.showWateringFinished(plant.name)
         }
     }
 
     fun processOfflineEvent(event: DeviceWateringEvent) {
-        val plant = plants.value.find { it.motorNumber == event.motor } ?: return
+        if (event.epoch <= 0) return
+        val plant = plantsFlow.value.find { it.motorNumber == event.motor } ?: return
         val timestamp = event.epoch * 1000L
 
         // Check if we already have this event in history (simple deduplication by timestamp/motor)
-        if (history.value.any { it.motorNumber == event.motor && it.timestamp == timestamp }) return
+        if (historyFlow.value.any { it.motorNumber == event.motor && it.timestamp == timestamp }) return
 
         val newEvent = WateringEvent(
             id = UUID.randomUUID().toString(),
@@ -81,8 +85,10 @@ class HistoryManager(
 
         // Update the plant's UI state if this is the newest watering we've seen
         if (timestamp > plant.lastWateredTimestamp) {
-            plants.value = plants.value.map { p ->
-                if (p.id == plant.id) p.copy(lastWateredTimestamp = timestamp) else p
+            plantsFlow.update { currentList ->
+                currentList.map { p ->
+                    if (p.id == plant.id) p.copy(lastWateredTimestamp = timestamp) else p
+                }
             }
         }
     }

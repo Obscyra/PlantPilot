@@ -46,14 +46,13 @@ sealed class HardwareEvent {
 
 class HardwareRepository : HardwareConnection {
     companion object {
-        private const val HEARTBEAT_INTERVAL_MS = 5000L
         // Number of consecutive unanswered heartbeat probes before we assume the
         // ESP32 is gone. Tolerates a slow-but-alive link instead of force-closing.
         private const val MAX_MISSED_PROBES = 3
         // Grace period before flipping to "Disconnected" in the UI. Brief WebSocket
         // drops (app backgrounding, network hiccup) are invisible if the link
         // recovers within this window.
-        private const val DISCONNECT_DEBOUNCE_MS = 10000L
+        private const val DISCONNECT_DEBOUNCE_MS = 15000L
         // Watering briefly glitches the link (relay switching shares the power
         // rail with the ESP32), so tolerate a longer silence while a watering is
         // in flight rather than flashing "Reconnecting" mid-watering.
@@ -64,13 +63,14 @@ class HardwareRepository : HardwareConnection {
         private const val BACKOFF_MULTIPLIER = 1.7
         private const val BACKOFF_MAX_MS = 30000L
         private const val BACKOFF_JITTER = 0.2
-        // After this many consecutive failures, stop auto-retrying.
-        private const val MAX_RETRY_ATTEMPTS = 8
+        // After this many consecutive failures, stop auto-retrying and show "Offline".
+        private const val MAX_RETRY_ATTEMPTS = 5
     }
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS) // Protocol-level keepalive
         .build()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -99,10 +99,12 @@ class HardwareRepository : HardwareConnection {
     private var heartbeatJob: Job? = null
     private var disconnectDebounceJob: Job? = null
     private var lastMessageTime = 0L
+    private var lastCommandSentTime = 0L // Tracks when we last sent a REAL command to ESP32
     private var lastHeartbeatSentTime = 0L
     private var missedProbes = 0
     private var consecutiveFailures = 0
     private var wateringInProgress = false
+    private var isBackgrounded = false
 
     // Tracks when we last sent a pump command to prevent server "ok" messages
     // (which contain the state of all pumps) from clobbering a newer local
@@ -143,9 +145,25 @@ class HardwareRepository : HardwareConnection {
             s == ConnectionState.Connecting
     }
 
+    private val _wateringInProgressState = MutableStateFlow(false)
+    override val wateringInProgressState: StateFlow<Boolean> = _wateringInProgressState.asStateFlow()
+
+    private fun sanitizeWsUrl(input: String): String {
+        var raw = input.trim()
+        if (raw.isBlank()) return "ws://plantpilot.local/ws"
+        if (raw.startsWith("ws://") || raw.startsWith("wss://")) return raw
+        if (raw.startsWith("http://")) raw = raw.removePrefix("http://")
+        if (raw.startsWith("https://")) raw = raw.removePrefix("https://")
+        raw = raw.trimEnd('/')
+        if (raw.endsWith("/ws")) return "ws://$raw"
+        return "ws://$raw/ws"
+    }
+
     override fun connect(url: String) {
-        if (url == currentUrl && _connectionState.value == ConnectionState.Connected) return
-        currentUrl = url
+        val cleanUrl = sanitizeWsUrl(url)
+        if (cleanUrl == currentUrl && _connectionState.value == ConnectionState.Connected) return
+        if (_connectionState.value == ConnectionState.Connecting) return
+        currentUrl = cleanUrl
         userInitiatedDisconnect = false
         consecutiveFailures = 0
         cancelReconnect()
@@ -184,7 +202,6 @@ class HardwareRepository : HardwareConnection {
                 if (requestedCadenceSec > 0) {
                     sendCommand("SYNC_MODE $requestedCadenceSec")
                 }
-                sendCommand("STATUS")
                 startHeartbeat()
             }
 
@@ -220,38 +237,50 @@ class HardwareRepository : HardwareConnection {
     }
 
     private fun onConnectionLost(message: String) {
-        // During a watering grace window, keep the heartbeat alive so its
-        // STATUS probes can detect a quick recovery (relay-induced WiFi blip).
-        if (!wateringInProgress) stopHeartbeat()
         addLog(message)
-        if (disconnectDebounceJob?.isActive == true) return
-        disconnectDebounceJob = scope.launch {
-            val debounceMs = if (wateringInProgress) WATERING_DEBOUNCE_MS else DISCONNECT_DEBOUNCE_MS
-            delay(debounceMs)
-            // Liveness check: if the link recovered during the grace window
-            // (e.g. we received telemetry/STATUS), cancel the disconnect.
-            val recovered = System.currentTimeMillis() - lastMessageTime < debounceMs
-            if (recovered) {
-                missedProbes = 0
-                if (_connectionState.value != ConnectionState.Connected) {
-                    _connectionState.value = ConnectionState.Connected
-                }
-                return@launch
-            }
+        if (userInitiatedDisconnect) return
+
+        // 1. Immediately transition physical state to Reconnecting.
+        // Also flip from Connecting -> Reconnecting after the first failure so 
+        // the ViewModel's periodic poll can start checking HTTP connectivity.
+        if (_connectionState.value == ConnectionState.Connected || _connectionState.value == ConnectionState.Connecting) {
+            _connectionState.value = ConnectionState.Reconnecting
+        }
+
+        consecutiveFailures++
+
+        // 2. Decide: Retry or Fail? 
+        // If we've reached the limit, stop the automatic socket loop and rely on
+        // the ViewModel poll or user "Retry" to recover.
+        if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
+            _connectionState.value = ConnectionState.Failed
+            addLog("System: Connection failed after $MAX_RETRY_ATTEMPTS attempts.")
+            
+            // Clear data immediately on hard failure
             _telemetry.value = null
             resetPumpStates()
             stopHeartbeat()
-            if (userInitiatedDisconnect) {
-                _connectionState.value = ConnectionState.Disconnected
-            } else {
-                consecutiveFailures++
-                if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
-                    _connectionState.value = ConnectionState.Failed
-                    addLog("System: Connection lost after $MAX_RETRY_ATTEMPTS attempts. Still retrying in the background...")
-                } else {
-                    _connectionState.value = ConnectionState.Reconnecting
+            disconnectDebounceJob?.cancel()
+            disconnectDebounceJob = null
+            return
+        }
+
+        // 3. Start/Update the Reconnection Loop
+        scheduleReconnect()
+
+        // 4. UI/Data Grace Period: Only clear telemetry and stop heartbeat in 
+        // the UI if the link stays dead for a while (prevents flickering).
+        if (disconnectDebounceJob?.isActive != true) {
+            disconnectDebounceJob = scope.launch {
+                val debounceMs = if (wateringInProgress) WATERING_DEBOUNCE_MS else DISCONNECT_DEBOUNCE_MS
+                delay(debounceMs)
+                
+                // If we haven't successfully connected by now, clear the data
+                if (_connectionState.value != ConnectionState.Connected) {
+                    _telemetry.value = null
+                    resetPumpStates()
+                    stopHeartbeat()
                 }
-                scheduleReconnect()
             }
         }
     }
@@ -283,19 +312,36 @@ class HardwareRepository : HardwareConnection {
         stopHeartbeat()
         heartbeatJob = scope.launch {
             while (isActive) {
-                delay(HEARTBEAT_INTERVAL_MS)
+                // Adaptive interval: 45s in background (under 60s timeout), 10s in foreground.
+                val interval = if (isBackgrounded) 45000L else 10000L
+                delay(interval)
                 if (_connectionState.value != ConnectionState.Connected && _connectionState.value != ConnectionState.Reconnecting) continue
+                
                 val now = System.currentTimeMillis()
+                
+                // 1. ESP32 Staleness Check: The firmware stops pumps if it sees no 
+                // command for 60s. We MUST send a command even if we are receiving telemetry.
+                val staleInterval = if (isBackgrounded) 45000L else 30000L
+                val timeSinceLastSent = now - lastCommandSentTime
+                if (timeSinceLastSent >= staleInterval) {
+                    // Use minimal PING to reset timer without heavy payload
+                    sendCommand(if (isBackgrounded) "PING" else "STATUS")
+                }
+
+                // 2. Link Liveness Check: If we haven't RECEIVED anything, the link might be dead.
                 val idle = now - lastMessageTime
-                if (idle >= HEARTBEAT_INTERVAL_MS) {
+                if (idle >= interval) {
                     val probeOutstanding = lastHeartbeatSentTime != 0L && lastMessageTime < lastHeartbeatSentTime
                     if (probeOutstanding && missedProbes >= MAX_MISSED_PROBES) {
                         // The ESP32 hasn't replied for several probes — assume gone.
                         missedProbes = 0
+                        addLog("System: Link timed out (missed ${MAX_MISSED_PROBES} probes)")
                         webSocket?.close(1000, "ESP32 not responding")
+                        onConnectionLost("Error: Response timeout")
                     } else {
                         if (probeOutstanding) missedProbes++
-                        sendCommand("STATUS")
+                        // Use minimal PING for routine heartbeat
+                        sendCommand(if (isBackgrounded) "PING" else "STATUS")
                         lastHeartbeatSentTime = now
                     }
                 }
@@ -327,11 +373,6 @@ class HardwareRepository : HardwareConnection {
         // Optimistic UI: Update local pump states immediately when a pump command
         // is sent, so the switches feel responsive.
         when {
-            command == "PUMP_ALL_ON" -> {
-                val now = System.currentTimeMillis()
-                (1..4).forEach { lastPumpCommandTime[it] = now }
-                updateAllPumpStates(true)
-            }
             command == "PUMP_ALL_OFF" -> {
                 val now = System.currentTimeMillis()
                 (1..4).forEach { lastPumpCommandTime[it] = now }
@@ -347,8 +388,23 @@ class HardwareRepository : HardwareConnection {
                     }
                     val state = parts[1] == "ON"
                     if (pumpNum != null) {
-                        lastPumpCommandTime[pumpNum] = System.currentTimeMillis()
-                        updatePumpState(pumpNum, state)
+                        val now = System.currentTimeMillis()
+                        lastPumpCommandTime[pumpNum] = now
+                        
+                        // Mutually Exclusive Optimistic UI: If turning a pump ON,
+                        // all other pumps are assumed to be turned OFF by the 
+                        // firmware's safety logic.
+                        if (state) {
+                            (1..4).forEach { id ->
+                                if (id != pumpNum) {
+                                    lastPumpCommandTime[id] = now
+                                }
+                            }
+                            updateAllPumpStates(false) // Reset all
+                            updatePumpState(pumpNum, true) // Then set the active one
+                        } else {
+                            updatePumpState(pumpNum, false)
+                        }
                     }
                 }
             }
@@ -361,7 +417,12 @@ class HardwareRepository : HardwareConnection {
     private fun sendPhysicalCommand(command: String) {
         addLog("App: Sent $command")
         try {
-            webSocket?.send(command)
+            val sent = webSocket?.send(command) == true
+            if (sent) {
+                lastCommandSentTime = System.currentTimeMillis()
+            } else {
+                addLog("Warn: WebSocket send failed for $command (buffer full or closing)")
+            }
         } catch (e: Exception) {
             addLog("Error: ${e.message}")
         }
@@ -395,17 +456,27 @@ class HardwareRepository : HardwareConnection {
     override fun pauseTelemetry() {
         if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
             sendCommand("TELEMETRY_PAUSE")
+            addLog("App: Telemetry paused (backgrounded)")
         }
     }
 
     override fun resumeTelemetry() {
         if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
             sendCommand("TELEMETRY_RESUME")
+            addLog("App: Telemetry resumed (foregrounded)")
         }
+    }
+
+    override fun setIsBackgrounded(active: Boolean) {
+        if (isBackgrounded == active) return
+        isBackgrounded = active
+        // Restart heartbeat with new interval immediately
+        startHeartbeat()
     }
 
     override fun setWateringInProgress(active: Boolean) {
         wateringInProgress = active
+        _wateringInProgressState.value = active
     }
 
     override fun logUserAction(message: String) {
@@ -445,8 +516,8 @@ class HardwareRepository : HardwareConnection {
                     // Don't sync pump states from telemetry — it overwrites local
                     // toggles before the ESP32 confirms. States are synced via
                     // OK responses and STATUS replies instead.
-                } else if (type == "ok") {
-                    // Command acknowledgment with actual pump states from firmware.
+                } else if (type == "ok" || type == "status") {
+                    // Command acknowledgment or status response with actual pump states from firmware.
                     // Only update the local state if we haven't sent a command
                     // recently, otherwise the optimistic toggle wins until the
                     // server "catches up".
@@ -457,6 +528,7 @@ class HardwareRepository : HardwareConnection {
                             val pumpId = index + 1
                             if (pumpId in 1..4) {
                                 val lastSent = lastPumpCommandTime[pumpId] ?: 0L
+                                // Firmware confirms current state.
                                 if (now - lastSent > 1200L) { // 1.2s grace period
                                     newStates[pumpId] = elem.jsonPrimitive.boolean
                                 }
@@ -496,10 +568,7 @@ class HardwareRepository : HardwareConnection {
             _pumpStates.value = newStates
         } else if (text.startsWith("OK: PUMP")) {
             val now = System.currentTimeMillis()
-            if (text == "OK: PUMP_ALL_ON") {
-                (1..4).forEach { lastPumpCommandTime[it] = 0L } // Clear so it applies
-                _pumpStates.value = mapOf(1 to true, 2 to true, 3 to true, 4 to true)
-            } else if (text == "OK: PUMP_ALL_OFF") {
+            if (text == "OK: PUMP_ALL_OFF") {
                 (1..4).forEach { lastPumpCommandTime[it] = 0L }
                 _pumpStates.value = mapOf(1 to false, 2 to false, 3 to false, 4 to false)
             } else {

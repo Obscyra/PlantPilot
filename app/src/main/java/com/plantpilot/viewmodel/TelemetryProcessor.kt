@@ -10,6 +10,7 @@ import com.plantpilot.util.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -19,8 +20,8 @@ import kotlinx.coroutines.launch
  * a debounced snapshot so a fully closed app reopens with last-known data.
  */
 class TelemetryProcessor(
-    private val deviceState: MutableStateFlow<DeviceState>,
-    private val plants: MutableStateFlow<List<Plant>>,
+    private val deviceStateFlow: MutableStateFlow<DeviceState>,
+    private val plantsFlow: MutableStateFlow<List<Plant>>,
     private val settings: StateFlow<AppSettings>,
     private val scope: CoroutineScope,
     private val settingsManager: SettingsManager,
@@ -42,16 +43,20 @@ class TelemetryProcessor(
         // it, so it can't drive the displayed tank level. Until a real tank
         // sensor is wired, derive the discrete level from the app-tracked
         // estimate (estimatedWaterMl).
-        val capacity = deviceState.value.tankCapacityMl
-        val tankLevel = mlToLevel(deviceState.value.estimatedWaterMl, capacity)
-        deviceState.value = deviceState.value.copy(
-            waterTankLevel = tankLevel,
-            wifiSsid = status.wifi_ssid ?: deviceState.value.wifiSsid
-        )
+        val capacity = deviceStateFlow.value.tankCapacityMl
+        val tankLevel = mlToLevel(deviceStateFlow.value.estimatedWaterMl, capacity)
+        
+        deviceStateFlow.update { current ->
+            current.copy(
+                waterTankLevel = tankLevel,
+                wifiSsid = status.wifi_ssid ?: current.wifiSsid,
+                queuedPumps = status.queued ?: listOf(false, false, false, false)
+            )
+        }
 
         // Hourly low-water reminder
         if (settings.value.notificationsLowWater &&
-            tankLevel <= deviceState.value.lowWaterThreshold
+            tankLevel <= deviceStateFlow.value.lowWaterThreshold
         ) {
             val now = System.currentTimeMillis()
             if (now - lastLowWaterNotifiedAt >= LOW_WATER_NOTIFY_INTERVAL_MS) {
@@ -61,9 +66,11 @@ class TelemetryProcessor(
         }
 
         // Update plants with real moisture data from push
-        plants.value = plants.value.map { plant ->
-            val moisture = status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
-            plant.copy(currentMoisture = moisture)
+        plantsFlow.update { currentList ->
+            currentList.map { plant ->
+                val moisture = status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
+                plant.copy(currentMoisture = moisture)
+            }
         }
 
         // Keep per-plant config in sync from the live stream (device-newer only).

@@ -28,29 +28,40 @@ object ConnectionStateHelper {
 
     /**
      * Delayed-reveal variant of [real] for display-layer consumers only.
-     * Reconnecting is held back for 500 ms so short-lived reconnects (which
-     * resolve almost instantly on retry) never flash a "Reconnecting" label.
-     * Command guards (canSendCommands / canDisplayLastKnownData) must continue
-     * reading the real connection state directly — never this.
+     * Transient states (Connecting, Reconnecting) are held back briefly so
+     * short-lived transitions (e.g. a 100ms handshake or a quick retry) don't
+     * flash in the UI.
      */
     fun debouncedConnectionState(
         real: StateFlow<ConnectionState>,
         scope: CoroutineScope,
+        wateringInProgress: StateFlow<Boolean>? = null,
     ): StateFlow<ConnectionState> {
         val display = MutableStateFlow(real.value)
         var revealJob: Job? = null
         scope.launch {
             real.collect { state ->
-                if (state == ConnectionState.Reconnecting) {
-                    revealJob?.cancel()
-                    revealJob = scope.launch {
-                        delay(500)
-                        display.value = ConnectionState.Reconnecting
+                when (state) {
+                    ConnectionState.Connecting -> {
+                        revealJob?.cancel()
+                        revealJob = scope.launch {
+                            delay(400) // Debounce initial connection attempt
+                            display.value = ConnectionState.Connecting
+                        }
                     }
-                } else {
-                    revealJob?.cancel()
-                    revealJob = null
-                    display.value = state
+                    ConnectionState.Reconnecting -> {
+                        revealJob?.cancel()
+                        revealJob = scope.launch {
+                            val debounceMs = if (wateringInProgress?.value == true) 15000L else 600L
+                            delay(debounceMs) // Debounce reconnection attempts
+                            display.value = ConnectionState.Reconnecting
+                        }
+                    }
+                    else -> {
+                        revealJob?.cancel()
+                        revealJob = null
+                        display.value = state
+                    }
                 }
             }
         }

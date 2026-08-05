@@ -15,9 +15,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.plantpilot.R
 import com.plantpilot.viewmodel.PlantPilotViewModel
 import kotlinx.coroutines.launch
 
@@ -89,17 +91,25 @@ fun OnboardingScreen(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Surface(
-                        modifier = Modifier.size(120.dp),
+                        modifier = Modifier.size(160.dp),
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primaryContainer
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = pages[page].icon,
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
+                            if (page == 0) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.app_logo),
+                                    contentDescription = "PlantPilot Logo",
+                                    modifier = Modifier.size(110.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = pages[page].icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
                         }
                     }
 

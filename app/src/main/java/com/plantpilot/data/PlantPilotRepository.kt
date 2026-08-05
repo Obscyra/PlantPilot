@@ -15,6 +15,7 @@ object NetworkModule {
     private val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
+        encodeDefaults = true
     }
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
@@ -32,18 +33,21 @@ object NetworkModule {
         get() = _apiService ?: createService(currentUrl)
 
     fun updateBaseUrl(newHost: String) {
-        if (newHost.isBlank() || newHost.length < 3) return // Ignore invalid/short hosts
+        if (newHost.isBlank()) return // Ignore invalid/short hosts
+        var raw = newHost.trim()
+        if (raw.startsWith("ws://")) raw = raw.removePrefix("ws://")
+        if (raw.startsWith("wss://")) raw = raw.removePrefix("wss://")
+        if (raw.startsWith("http://")) raw = raw.removePrefix("http://")
+        if (raw.startsWith("https://")) raw = raw.removePrefix("https://")
+        raw = raw.trimEnd('/')
+        if (raw.endsWith("/ws")) raw = raw.removeSuffix("/ws")
+        if (raw.length < 3) return
 
-        val newUrl = if (newHost.startsWith("http")) {
-            if (newHost.endsWith("/")) newHost else "$newHost/"
-        } else {
-            "http://$newHost/"
-        }
+        val newUrl = "http://$raw/"
         
         if (currentUrl != newUrl) {
             try {
                 // Verify it's a valid URL before applying
-                "application/json".toMediaType()
                 val service = createService(newUrl)
                 currentUrl = newUrl
                 _apiService = service
@@ -82,9 +86,9 @@ class PlantPilotRepository {
         }
     }
 
-    suspend fun waterNow(motorId: Int, rate: Int? = null): Result<GenericResponse> {
+    suspend fun waterNow(motorId: Int, rate: Int? = null, amount: Int? = null): Result<GenericResponse> {
         return try {
-            val response = api.waterNow(motorId, rate)
+            val response = api.waterNow(motorId, rate, amount)
             val body = response.body()
             if (response.isSuccessful && body != null) {
                 Result.success(body)

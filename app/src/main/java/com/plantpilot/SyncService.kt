@@ -16,8 +16,12 @@ import com.plantpilot.data.HardwareConnection
 import com.plantpilot.data.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -44,6 +48,8 @@ class SyncService : Service() {
     private val hardwareConnection: HardwareConnection
         get() = (applicationContext as PlantPilotApp).hardwareConnection
 
+    private var reconnectJob: Job? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -52,11 +58,17 @@ class SyncService : Service() {
         // backgrounded so Android's Doze can't suspend the WebSocket that
         // streams telemetry from the ESP32. Released on stop.
         acquireWakeLock()
-        // Reconnect if the socket isn't already up. Handles the case where the
-        // process was killed while backgrounded and this service was restarted
-        // by START_STICKY: the ViewModel (and its connectToDevice()) won't run
-        // until the user reopens the app, so the service must reconnect itself.
-        serviceScope.launch { reconnectIfNeeded() }
+        // Reconnect loop: keeps the connection alive while the service is running.
+        // Handles the case where the process was killed while backgrounded or
+        // where the WebSocket retry loop gave up after reaching MAX_RETRY_ATTEMPTS.
+        // The service nudges the HardwareConnection every 60s if not connected.
+        reconnectJob?.cancel()
+        reconnectJob = serviceScope.launch {
+            while (isActive) {
+                reconnectIfNeeded()
+                delay(60000L) // 1 minute check interval
+            }
+        }
         return START_STICKY
     }
 
@@ -64,8 +76,7 @@ class SyncService : Service() {
         if (hardwareConnection.isConnected()) return
         val prefs = SettingsManager(this).deviceStateFlow.first()
         if (prefs.ip.isBlank()) return
-        val url = if (prefs.ip.startsWith("ws://")) prefs.ip else "ws://${prefs.ip}/ws"
-        hardwareConnection.connect(url)
+        hardwareConnection.connect(prefs.ip)
     }
 
     private fun acquireWakeLock() {
@@ -138,6 +149,8 @@ class SyncService : Service() {
     }
 
     override fun onDestroy() {
+        reconnectJob?.cancel()
+        serviceScope.coroutineContext.cancelChildren()
         releaseWakeLock()
         super.onDestroy()
     }

@@ -80,7 +80,8 @@ object MockData {
         waterTankSensorValue = 0,
         tankCapacityMl = 5000,
         lowWaterThreshold = 1,
-        estimatedWaterMl = 5000
+        estimatedWaterMl = 5000,
+        queuedPumps = listOf(false, false, false, false)
     )
 
     fun defaultSettings() = AppSettings(
