@@ -30,11 +30,8 @@ fun HomeScreen(
     val settings by viewModel.settings.collectAsState()
     val deviceState by viewModel.deviceState.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
+    val isRefreshing = viewModel.isRefreshingDevice
     val canSendCommands = com.plantpilot.data.ConnectionStateHelper.canSendCommands(connectionState)
-    val canDisplayLastKnownData = com.plantpilot.data.ConnectionStateHelper.canDisplayLastKnownData(connectionState)
-    var isRefreshing by remember { mutableStateOf(value = false) }
-    var showWateringSnackbar by remember { mutableStateOf(value = false) }
-    var wateringPlantName by remember { mutableStateOf(value = "") }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -70,10 +67,7 @@ fun HomeScreen(
             isRefreshing = isRefreshing,
             onRefresh = {
                 scope.launch {
-                    isRefreshing = true
                     viewModel.refreshData()
-                    delay(800.milliseconds)
-                    isRefreshing = false
                 }
             },
             modifier = Modifier.padding(paddingValues = paddingValues),
@@ -125,18 +119,8 @@ fun HomeScreen(
                             waterEnabled = canSendCommands,
                             onWaterNow = {
                                 scope.launch {
-                                    wateringPlantName = plant.name
-                                    showWateringSnackbar = true
-
-                                    // Fire the actual watering in the background
-                                    val wateringJob = async { viewModel.waterPlant(plantId = plant.id) }
-
-                                    // Animation lasts exactly 3 seconds regardless of watering duration
-                                    delay(3000)
-                                    showWateringSnackbar = false
-
-                                    if (wateringJob.await()) {
-                                        // Watering complete - no message needed here
+                                    if (viewModel.waterPlant(plantId = plant.id)) {
+                                        // Watering complete
                                     } else {
                                         snackbarHostState.showSnackbar(
                                             message = "Failed to reach device",
@@ -151,11 +135,6 @@ fun HomeScreen(
                     }
                 }
             }
-        }
-
-        // Loading overlay
-        if (showWateringSnackbar) {
-            WateringOverlay(plantName = wateringPlantName)
         }
     }
 }

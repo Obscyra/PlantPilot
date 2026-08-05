@@ -126,10 +126,14 @@ fun WaterTankIndicator(
 
                 val fillPercentage = animatedFill.value
                 val fillHeight = tankHeight * fillPercentage
-                val waterTop = bottom - fillHeight
+                // Cap waterTop so waves never go above the tank top (clipPath would hide them).
+                // When the tank is full, waterTop sits waveAmplitude below the top edge,
+                // keeping the ripple visible even at 100% fill.
+                val waveAmplitude = 3.dp.toPx()
+                val rawWaterTop = bottom - fillHeight
+                val waterTop = rawWaterTop.coerceAtLeast(top + waveAmplitude)
 
                 if (fillHeight > 0) {
-                    val waveAmplitude = 3.dp.toPx()
                     val steps = 60
 
                     clipPath(tankPath) {

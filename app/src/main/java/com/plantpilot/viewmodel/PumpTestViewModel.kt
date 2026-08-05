@@ -25,7 +25,11 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
     // Delayed-reveal variant for display-layer consumers only (same semantics as
     // PlantPilotViewModel.displayConnectionState — see ConnectionStateHelper).
     val displayConnectionState: StateFlow<ConnectionState> =
-        ConnectionStateHelper.debouncedConnectionState(repository.connectionState, viewModelScope)
+        ConnectionStateHelper.debouncedConnectionState(
+            repository.connectionState,
+            viewModelScope,
+            repository.wateringInProgressState
+        )
 
     val pumpStates = repository.pumpStates
     val telemetry = repository.telemetry
@@ -45,7 +49,6 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
 
     // Rate-limit local toggles to prevent double-taps/jitter from flooding the repo
     private val lastToggleTime = mutableMapOf<Int, Long>()
-    private var lastAllToggleTime = 0L
 
     init {
         viewModelScope.launch {
@@ -101,19 +104,6 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
 
         val letter = when (pumpId) { 1 -> "A"; 2 -> "B"; 3 -> "C"; 4 -> "D"; else -> "$pumpId" }
         val cmd = "PUMP${letter}_${if (turnOn) "ON" else "OFF"}"
-        repository.sendCommand(cmd)
-    }
-
-    fun turnAllPumps(turnOn: Boolean) {
-        if (!canSendCommands) {
-            _commandBlockedEvents.trySend("Can't control pumps — device offline")
-            return
-        }
-        val now = System.currentTimeMillis()
-        if (now - lastAllToggleTime < 400) return // Higher debounce for "All" commands
-        lastAllToggleTime = now
-
-        val cmd = "PUMP_ALL_${if (turnOn) "ON" else "OFF"}"
         repository.sendCommand(cmd)
     }
 

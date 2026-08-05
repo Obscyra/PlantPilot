@@ -13,6 +13,7 @@
 #include <time.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
+#include "esp_adc_cal.h"
 
 // --- CONFIGURATION ---
 const char* HOSTNAME = "plantpilot";
@@ -23,10 +24,11 @@ const int MAX_WATERING_ML = 10000;    // Max ml per watering cycle
 
 // --- ONBOARD LED STATUS ---
 // WROOM-32 dev kits expose a built-in blue LED on GPIO 2.
-// Solid = WiFi connected, fast blink = connecting/lost, slow blink = setup mode.
+// 1. Uniform Fast Blink (200ms) = WiFi not connected / searching
+// 2. Double-Heartbeat Pulse     = Setup (SoftAP) Mode
+// 3. Short Blip (every 2s)      = WiFi connected, but App disconnected (Idle)
+// 4. Solid ON                   = WiFi connected AND App connected (Active)
 #define STATUS_LED GPIO_NUM_2
-#define LED_BLINK_CONNECTING_MS 250
-#define LED_BLINK_SETUP_MS      700
 
 // NTP & Time
 const char* NTP_SERVER = "pool.ntp.org";
@@ -47,7 +49,8 @@ String cachedWifiSsid = "";
 // WiFi Resilience
 unsigned long lastWifiRetry = 0;
 uint8_t lastWiFiReason = 0;
-bool wasConnected = false;
+volatile bool wasConnected = false;
+bool didRadioReset = false; // Moved from loop() to allow reset on connection
 unsigned long restartTime = 0;
 bool pendingRestart = false;
 bool setupModeActive = false;
@@ -94,7 +97,7 @@ struct Relay {
     unsigned long startTime;
     unsigned long duration;
     const char* name;
-    const char* lastTriggerSource;
+    char lastTriggerSource[16];
     int lastAmountMl;
 };
 
@@ -102,62 +105,207 @@ struct Relay {
 #define RELAY_OFF HIGH
 
 Relay pumps[4] = {
-    {25, 34, false, 0, 0, "Pump 1"},
-    {26, 35, false, 0, 0, "Pump 2"},
-    {27, 32, false, 0, 0, "Pump 3"},
-    {14, 33, false, 0, 0, "Pump 4"}
+    {25, 34, false, 0, 0, "Pump 1", "none", 0},
+    {26, 35, false, 0, 0, "Pump 2", "none", 0},
+    {27, 32, false, 0, 0, "Pump 3", "none", 0},
+    {14, 33, false, 0, 0, "Pump 4", "none", 0}
 };
 
 MotorSettings motorConfigs[4];
 int soilMoisture[4] = {50, 50, 50, 50};
 int rawSoilCache[4] = {0, 0, 0, 0};
 int waterLevel = 100;
+
+// ADC Calibration Characteristics
+esp_adc_cal_characteristics_t *adc_chars;
 // Epoch of the last completed timed watering per pump; used to enforce the
 // per-plant min auto-water interval. Reset to 0 on boot (no gating until the
 // first completion). Uses millis() for internal robustness against NTP issues.
 unsigned long lastAutoWaterTime[4] = {0, 0, 0, 0};
-// Last time each plant's sensor was freshly read for auto-watering decisions.
-// 0 = boot, so the first check reads immediately. Auto-mode plants are only
-// re-read every SENSOR_READ_INTERVAL_MS (10 min) so the ADC stays logically
-// off the rest of the time when the app is closed.
-unsigned long lastAutoSensorRead[4] = {0, 0, 0, 0};
+
+// --- PER-CHANNEL ADAPTIVE POLLING ---
+// Each auto-mode channel has its own sensor-read schedule based on moisture
+// proximity to threshold.  Far from threshold = slow reads, near = fast reads.
+struct ChannelPollState {
+    unsigned long nextReadDueMs;     // millis() deadline — loop() checks this
+    unsigned long currentIntervalMs; // adaptive interval (recomputed on events)
+    int lastMoisture;                // cached reading for delta calculations
+    bool active;                     // true when autoMode or schedules exist
+};
+ChannelPollState channelPoll[4];
+
+// --- MOTOR BUSY LOCK ---
+// Only one motor may run at a time to prevent power-surge / brownout issues
+// when multiple pumps start simultaneously.  -1 = idle.
+int activeMotorIndex = -1;
 
 // Sensor read cadence. Raw ADC readings are only refreshed every 10 minutes
 // for the dashboard; opening the calibration sheet forces a 1s realtime stream.
 const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
-bool calibrationStreamActive = false;
-bool telemetryPaused = false;
+volatile bool calibrationStreamActive = false;
+volatile bool telemetryPaused = false;
+// Minimum delay (ms) before the first telemetry push after a new WebSocket
+// connection, preventing a flood of messages that can overflow the TCP buffer.
+volatile unsigned long firstTelemetryAfterConnectMs = 0;
 unsigned long lastSensorSent = 0;
 // Set by the WS command handler (AsyncTCP task) to ask loop() to run the heavy
 // broadcastTelemetry() on the main loop stack instead of the small async task
 // stack, preventing a stack overflow when a command triggers a full sensor read.
 volatile bool pendingSensorRead = false;
 
+// --- CLIENT HEARTBEAT TRACKING ---
+// Tracks the last time the app sent any WS command (STATUS, SYNC_MODE, etc.).
+// If no command arrives for STALE_CLIENT_TIMEOUT_MS the ESP32 treats the client
+// as dead and triggers stopOnDisconnect logic.  This catches silent disconnects
+// where the TCP link appears alive but the app has crashed/been killed.
+volatile unsigned long lastClientCommandMs = 0;
+const unsigned long STALE_CLIENT_TIMEOUT_MS = 60000UL; // 60 seconds (increased for stability)
+
 // Staggered pump update state to prevent network blocking and power surges
 struct StartReq {
-    bool pending;
+    volatile bool pending;
     int amount;
-    const char* source;
+    char source[16];
 };
 StartReq startQueue[4] = { {false, 0, ""}, {false, 0, ""}, {false, 0, ""}, {false, 0, ""} };
-unsigned long lastGlobalStart = 0;
-const int STAGGER_INTERVAL_MS = 150;
 
-bool staggeredStopPending = false;
+struct StopReq {
+    volatile bool pending;
+};
+StopReq stopQueue[4] = { {false}, {false}, {false}, {false} };
+
+unsigned long lastGlobalStart = 0;
+const int STAGGER_INTERVAL_MS = 250;
+
+volatile bool staggeredStopPending = false;
 int nextStaggeredStop = 0;
 unsigned long lastStaggerTime = 0;
 
 void requestPumpStart(int id, int amount, const char* src) {
     if (id < 0 || id >= 4 || pumps[id].isOn) return;
-    startQueue[id].pending = true;
+
+    // Manual Override: If the app requests a manual start (e.g. Pump Testing),
+    // stop any currently running motor immediately to prevent power surges.
+    if (src != nullptr && strcmp(src, "manual") == 0) {
+        if (activeMotorIndex >= 0 && activeMotorIndex != id) {
+            Serial.printf("[%s] [MOTOR] Manual override: stopping motor %d to start %d\n",
+                getLocalTimeStr(), activeMotorIndex + 1, id + 1);
+            requestPumpStop(activeMotorIndex);
+        }
+    } else {
+        // Sequential Scheduling: If an auto or scheduled watering starts while
+        // another is active, queue it. It will start automatically once the
+        // current one finishes.
+        if (activeMotorIndex >= 0 && activeMotorIndex != id) {
+            Serial.printf("[%s] [MOTOR] %s queued — motor %d is busy\n",
+                getLocalTimeStr(), pumps[id].name, activeMotorIndex + 1);
+        }
+    }
+
     startQueue[id].amount = amount;
-    startQueue[id].source = src;
+    if (src != nullptr) {
+        strncpy(startQueue[id].source, src, 15);
+        startQueue[id].source[15] = '\0';
+    } else {
+        strcpy(startQueue[id].source, "manual");
+    }
+    startQueue[id].pending = true;
+}
+
+void requestPumpStop(int id) {
+    if (id >= 0 && id < 4) stopQueue[id].pending = true;
+}
+
+// --- PER-CHANNEL ADAPTIVE POLLING ---
+
+// Recompute the adaptive read interval for one channel based on current
+// moisture distance from threshold.  Called after every sensor read and on
+// config/state changes so the schedule stays responsive.
+void recomputeChannelInterval(int i) {
+    if (i < 0 || i >= 4) return;
+    int moisture = channelPoll[i].lastMoisture;
+    int threshold = motorConfigs[i].moistureThreshold;
+    int gap = moisture - threshold; // positive = above threshold
+
+    unsigned long intervalMs;
+    if (gap > 20) {
+        // Far above threshold — idle reading (12 min)
+        intervalMs = 720000UL;
+    } else if (gap > 5) {
+        // Approaching threshold — moderate cadence (5 min)
+        intervalMs = 300000UL;
+    } else if (gap > 0) {
+        // Very close — watch closely (90 sec)
+        intervalMs = 90000UL;
+    } else {
+        // Below threshold — read frequently but not obsessively (2 min)
+        intervalMs = 120000UL;
+    }
+
+    // After a recent watering (within cooldown window), slow down to avoid
+    // re-triggering on residual moisture changes.
+    unsigned long nowMs = millis();
+    unsigned long nowEpoch = getNow();
+    if (motorConfigs[i].minIntervalHours > 0 && nowEpoch != 0 &&
+        motorConfigs[i].lastAutoWaterEpoch != 0) {
+        unsigned long elapsed = nowEpoch - motorConfigs[i].lastAutoWaterEpoch;
+        unsigned long cooldown = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
+        if (elapsed < cooldown) {
+            // Inside cooldown — relax to 15 min so we don't pollute ADC with
+            // pump-induced electrical noise and don't waste CPU.
+            intervalMs = 900000UL;
+        }
+    }
+
+    channelPoll[i].currentIntervalMs = intervalMs;
+    Serial.printf("[%s] [POLL] %s interval → %lus (moisture=%d%% threshold=%d%%)\n",
+        getLocalTimeStr(), pumps[i].name, intervalMs / 1000, moisture, threshold);
+}
+
+// Initialize all channel poll states (called from setup() after loadConfigs).
+void initChannelPolling() {
+    for (int i = 0; i < 4; i++) {
+        channelPoll[i].nextReadDueMs = 0; // read immediately on first check
+        channelPoll[i].currentIntervalMs = SENSOR_READ_INTERVAL_MS;
+        channelPoll[i].lastMoisture = 50;
+        channelPoll[i].active = motorConfigs[i].autoMode || motorConfigs[i].scheduleCount > 0;
+    }
+}
+
+// Recompute active flags and intervals when config changes (sync, calibrate, etc).
+void refreshChannelPolling() {
+    for (int i = 0; i < 4; i++) {
+        channelPoll[i].active = motorConfigs[i].autoMode || motorConfigs[i].scheduleCount > 0;
+        if (channelPoll[i].active) recomputeChannelInterval(i);
+    }
+}
+
+// Called after a motor finishes watering to reset its polling schedule.
+void onWateringComplete(int i) {
+    if (i >= 0 && i < 4) {
+        channelPoll[i].nextReadDueMs = millis() + 60000UL; // re-read 60s after completion
+        recomputeChannelInterval(i);
+    }
+}
+
+// --- MOTOR BUSY LOCK ---
+
+bool isMotorBusy() {
+    return activeMotorIndex >= 0;
+}
+
+void acquireMotorLock(int i) {
+    if (i >= 0 && i < 4) activeMotorIndex = i;
+}
+
+void releaseMotorLock() {
+    activeMotorIndex = -1;
 }
 
 // Telemetry cadence requested by the app via SYNC_MODE. Foreground -> 1s,
 // background -> 3s, no clients -> 60s. Reset to 3s on boot; the app re-sends
 // its mode whenever it (re)connects.
-unsigned long streamCadenceMs = 3000UL;
+volatile unsigned long streamCadenceMs = 3000UL;
 
 // Last time the heavy per-motor config array was included in a telemetry frame
 // (signature of versions/timestamps). Reset to 0 on boot and whenever a WS
@@ -230,6 +378,11 @@ void broadcastTelemetry() {
     doc["water_level"] = waterLevel;
     doc["ntp_synced"] = timeSet;
 
+    JsonArray queued = doc["queued"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) {
+        queued.add(startQueue[i].pending);
+    }
+
     // Track max loop time for diagnostics
     static unsigned long maxLoopMs = 0;
     static unsigned long lastLoopReset = 0;
@@ -240,11 +393,21 @@ void broadcastTelemetry() {
     }
     doc["loop_ms_max"] = maxLoopMs;
 
-    // Refresh raw ADC readings on a 10-minute cadence when idle, but on every
-    // broadcast while the app is connected (foreground 1s / background 3s) or
-    // the calibration sheet is streaming. A zero lastSensorSent (boot /
-    // READ_SENSORS command) forces an immediate read.
-    if (calibrationStreamActive || streamCadenceMs <= 3000UL || lastSensorSent == 0 || now - lastSensorSent >= SENSOR_READ_INTERVAL_MS) {
+    // Refresh raw ADC readings:
+    // 1. Always read if the App is connected (ws.count() > 0) or calibration is active.
+    // 2. Always read on boot / manual READ_SENSORS (lastSensorSent == 0).
+    // 3. Read on the idle 10-minute cadence if any automation is active.
+    bool isAppConnected = (ws.count() > 0);
+    bool anyAutoOrSchedule = false;
+    for (int i = 0; i < 4; i++) {
+        if (motorConfigs[i].autoMode || motorConfigs[i].scheduleCount > 0) {
+            anyAutoOrSchedule = true;
+            break;
+        }
+    }
+
+    if (isAppConnected || calibrationStreamActive || lastSensorSent == 0 ||
+       (anyAutoOrSchedule && (now - lastSensorSent >= SENSOR_READ_INTERVAL_MS))) {
         lastSensorSent = now;
         for (int i = 0; i < 4; i++) {
             rawSoilCache[i] = readRawSensor(i);
@@ -376,7 +539,20 @@ void syncWithNtp() {
 // --- HARDWARE ---
 
 void initRelays() {
-    Serial.println("[HARDWARE] Initializing Pins...");
+    Serial.println("[HARDWARE] Initializing Pins & ADC...");
+
+    // Characterize ADC for Rev 1.0 (uses eFuse Vref if available)
+    adc_chars = (esp_adc_cal_characteristics_t *)calloc(1, sizeof(esp_adc_cal_characteristics_t));
+    esp_adc_cal_value_t val_type = esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, adc_chars);
+    if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
+        Serial.println("[HARDWARE] ADC characterized using eFuse Vref (Optimal for Rev 1.0)");
+    } else {
+        Serial.println("[HARDWARE] ADC characterized using Default Vref");
+    }
+
+    analogReadResolution(12);
+    analogSetAttenuation(ADC_11db);
+
     for (int i = 0; i < 4; i++) {
         pinMode(pumps[i].pin, OUTPUT);
         digitalWrite(pumps[i].pin, RELAY_OFF);
@@ -389,38 +565,50 @@ void initStatusLed() {
     digitalWrite(STATUS_LED, LOW);
 }
 
-// Non-blocking WiFi status LED:
-//  - Solid ON  : STA connected (WL_CONNECTED)
-//  - Fast blink: connecting to / disconnected from the AP
-//  - Slow blink: SoftAP setup mode (no credentials yet)
+// Non-blocking status LED pattern generator.
+// Uses distinct rhythmic patterns rather than just frequency to avoid confusion.
 void updateStatusLed() {
-    static unsigned long lastToggle = 0;
-    static bool ledOn = false;
+    unsigned long now = millis();
 
-    if (WiFi.status() == WL_CONNECTED) {
+    // Pattern 4: Solid ON (WiFi + App Connected)
+    if (WiFi.status() == WL_CONNECTED && ws.count() > 0) {
         digitalWrite(STATUS_LED, HIGH);
-        lastToggle = 0;
-        ledOn = true;
         return;
     }
 
-    unsigned long interval = setupModeActive ? LED_BLINK_SETUP_MS : LED_BLINK_CONNECTING_MS;
-    unsigned long now = millis();
-    if (lastToggle == 0 || (now - lastToggle) >= interval) {
-        lastToggle = now;
-        ledOn = !ledOn;
-        digitalWrite(STATUS_LED, ledOn ? HIGH : LOW);
+    // Pattern 2: Double-Heartbeat (Setup / SoftAP Mode)
+    // ON(100ms) -> OFF(150ms) -> ON(100ms) -> OFF(650ms)
+    if (setupModeActive) {
+        unsigned long m = now % 1000;
+        if (m < 100) digitalWrite(STATUS_LED, HIGH);
+        else if (m < 250) digitalWrite(STATUS_LED, LOW);
+        else if (m < 350) digitalWrite(STATUS_LED, HIGH);
+        else digitalWrite(STATUS_LED, LOW);
+        return;
     }
+
+    // Pattern 1: Uniform Fast Blink (WiFi Disconnected / Searching)
+    // 200ms ON / 200ms OFF
+    if (WiFi.status() != WL_CONNECTED) {
+        digitalWrite(STATUS_LED, (now % 400 < 200) ? HIGH : LOW);
+        return;
+    }
+
+    // Pattern 3: Standby Blip (WiFi Connected, App Disconnected)
+    // Short 50ms pulse every 2 seconds to show it's "alive" but idle.
+    digitalWrite(STATUS_LED, (now % 2000 < 50) ? HIGH : LOW);
 }
 
 // Averages several ADC samples to suppress ESP32 analog noise.
+// Revision 1.0 silicon is particularly sensitive to Wi-Fi noise, so we use
+// 32 samples with small delays to ensure a stable reading.
 int readRawSensor(int index) {
     if (index < 0 || index >= 4) return 0;
-    long total = 0;
-    const int SAMPLES = 4;
+    uint32_t total = 0;
+    const int SAMPLES = 32;
     for (int s = 0; s < SAMPLES; s++) {
         total += analogRead(pumps[index].sensorPin);
-        delay(2);
+        delayMicroseconds(100);
     }
     return (int)(total / SAMPLES);
 }
@@ -443,6 +631,12 @@ int readMoisture(int index) {
 
 void triggerPump(int index, int amountMl, const char* source = "manual") {
     if (index < 0 || index >= 4 || pumps[index].isOn) return;
+    // Motor busy lock: if another motor is running, defer start.
+    if (isMotorBusy() && activeMotorIndex != index) {
+        Serial.printf("[%s] [PUMP] %s deferred — motor %d busy\n",
+            getLocalTimeStr(), pumps[index].name, activeMotorIndex + 1);
+        return; // loop() will dequeue when motor becomes idle
+    }
     amountMl = constrain(amountMl, 0, MAX_WATERING_ML);
 
     int durationMs = 0;
@@ -455,17 +649,25 @@ void triggerPump(int index, int amountMl, const char* source = "manual") {
         if (durationMs < 500) durationMs = 500;
     }
 
+    acquireMotorLock(index);
     pumps[index].isOn = true;
     pumps[index].startTime = millis();
     pumps[index].duration = durationMs; // 0 means indefinite
-    pumps[index].lastTriggerSource = source;
+
+    if (source != nullptr) {
+        strncpy(pumps[index].lastTriggerSource, source, sizeof(pumps[index].lastTriggerSource) - 1);
+        pumps[index].lastTriggerSource[sizeof(pumps[index].lastTriggerSource) - 1] = '\0';
+    } else {
+        strcpy(pumps[index].lastTriggerSource, "manual");
+    }
+
     pumps[index].lastAmountMl = amountMl;
 
     digitalWrite(pumps[index].pin, RELAY_ON);
     if (durationMs > 0) {
-        Serial.printf("[%s] [PUMP] %s ON for %d ml (%d ms) from %s\n", getLocalTimeStr(), pumps[index].name, amountMl, durationMs, source);
+        Serial.printf("[%s] [PUMP] %s ON for %d ml (%d ms) from %s\n", getLocalTimeStr(), pumps[index].name, amountMl, durationMs, pumps[index].lastTriggerSource);
     } else {
-        Serial.printf("[%s] [PUMP] %s ON (Indefinite) from %s\n", getLocalTimeStr(), pumps[index].name, source);
+        Serial.printf("[%s] [PUMP] %s ON (Indefinite) from %s\n", getLocalTimeStr(), pumps[index].name, pumps[index].lastTriggerSource);
     }
 }
 
@@ -474,6 +676,7 @@ void stopPump(int index) {
 
     pumps[index].isOn = false;
     digitalWrite(pumps[index].pin, RELAY_OFF);
+    releaseMotorLock();
     Serial.printf("[%s] [PUMP] %s OFF\n", getLocalTimeStr(), pumps[index].name);
 
     int moistureAfter = readMoisture(index);
@@ -496,8 +699,8 @@ void stopPump(int index) {
     // Diagnostic test toggles (indefinite, amount=0) must NOT emit
     // watering_finished or the app logs a false history entry.
     if (ws.count() > 0 && pumps[index].lastAmountMl > 0) {
-        static JsonDocument evtDoc;
-        static char evtBuf[256];
+        JsonDocument evtDoc;
+        char evtBuf[256];
         evtDoc.clear();
         JsonDocument &doc = evtDoc;
         doc["type"] = "watering_finished";
@@ -518,6 +721,9 @@ void stopPump(int index) {
         motorConfigs[index].lastAutoWaterEpoch = getNow();
         saveMotorConfig(index + 1);
     }
+
+    // Notify adaptive polling that this channel just completed a watering.
+    onWateringComplete(index);
 
     pumps[index].startTime = 0;
     pumps[index].duration = 0;
@@ -641,6 +847,9 @@ void checkSchedules() {
     }
 }
 
+// Per-channel adaptive auto-watering: each channel is checked only when its
+// individual deadline has arrived (set by recomputeChannelInterval).  Reads
+// a fresh sensor value per-channel and compares to threshold.
 void checkAutoWatering() {
     unsigned long nowMs = millis();
     unsigned long nowEpoch = getNow();
@@ -648,6 +857,9 @@ void checkAutoWatering() {
         if (!motorConfigs[i].isEnabled || !motorConfigs[i].autoMode) continue;
         // Skip if pump is already running or start is queued (avoids redundant ADC reads)
         if (pumps[i].isOn || startQueue[i].pending) continue;
+
+        // Motor busy lock: defer if another motor is running
+        if (isMotorBusy()) continue;
 
         // Respect the per-plant min auto-water interval.
         // 0 hours defaults to a 10-second safety gap to prevent rapid loops.
@@ -666,14 +878,16 @@ void checkAutoWatering() {
         // 2. Check session-based millis (protects against rapid loops even if NTP is broken)
         if (lastAutoWaterTime[i] != 0 && (nowMs - lastAutoWaterTime[i]) < minGapMs) continue;
 
-        // Read a fresh sensor value for this plant only, throttled to every
-        // SENSOR_READ_INTERVAL_MS (10 min) so the ADC is logically off the rest
-        // of the time when the app is closed. A zero timestamp (boot) forces an
-        // immediate first read.
-        if (lastAutoSensorRead[i] == 0 || nowMs - lastAutoSensorRead[i] >= SENSOR_READ_INTERVAL_MS) {
-            lastAutoSensorRead[i] = nowMs;
+        // Per-channel adaptive sensor read: read only when the channel's
+        // deadline has arrived (set by recomputeChannelInterval or boot).
+        if (nowMs >= channelPoll[i].nextReadDueMs) {
             soilMoisture[i] = readMoisture(i);
-            Serial.printf("[%s] [SENSOR] Auto read %s: %d%%\n", getLocalTimeStr(), pumps[i].name, soilMoisture[i]);
+            channelPoll[i].lastMoisture = soilMoisture[i];
+            channelPoll[i].nextReadDueMs = nowMs + channelPoll[i].currentIntervalMs;
+            recomputeChannelInterval(i);
+            Serial.printf("[%s] [SENSOR] Auto read %s: %d%% (next in %lus)\n",
+                getLocalTimeStr(), pumps[i].name, soilMoisture[i],
+                channelPoll[i].currentIntervalMs / 1000);
         }
         int moisture = soilMoisture[i];
         if (moisture < motorConfigs[i].moistureThreshold) {
@@ -703,10 +917,14 @@ const char CONNECTING_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><
 String getScanResults() {
     int n = WiFi.scanNetworks();
     String options = "";
-    if (n == 0) options = "<option disabled>No networks found</option>";
-    else {
-        for (int i = 0; i < n; ++i) options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)</option>";
+    if (n <= 0) {
+        options = "<option disabled>No networks found</option>";
+    } else {
+        for (int i = 0; i < n; ++i) {
+            options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)</option>";
+        }
     }
+    WiFi.scanDelete();
     return options;
 }
 
@@ -753,19 +971,63 @@ void startSetupMode() {
 // Reused small response doc + buffer (ok / pump state ACKs) to keep the WS
 // event-task path free of per-message heap alloc/free churn.
 static JsonDocument respDoc;
-static char respBuf[512];
+static char respBuf[2048]; // Increased to 2048 for full STATUS payloads
 
-// Builds a standard {"type":"ok","cmd":<c>,"pumps":[bool x4]} ACK into respBuf.
-void buildOkResponse(const String& cmd, bool withPumps) {
-    respDoc.clear();
-    JsonDocument &doc = respDoc;
+// Deferred command state to avoid race conditions between WS task and main loop
+volatile bool pendingStatusRequest = false;
+volatile uint32_t statusRequestClientId = 0;
+
+// Sends a small {"type":"ok","cmd":<c>,"pumps":[bool x4]} ACK.
+// Uses a local buffer to be thread-safe when called from the AsyncTCP task.
+void sendOkResponse(AsyncWebSocketClient *client, const String& cmd, bool withPumps) {
+    JsonDocument doc;
+    char localBuf[256];
     doc["type"] = "ok";
     doc["cmd"] = cmd;
     if (withPumps) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
         for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
     }
+    serializeJson(doc, localBuf, sizeof(localBuf));
+    sendWsRaw(client, localBuf);
+}
+
+// Heavy JSON status response: serialized in the main loop to avoid stack
+// overflow in the AsyncTCP task and to utilize the larger respBuf.
+void sendStatusResponse() {
+    if (ws.count() == 0) return;
+    respDoc.clear();
+    JsonDocument &doc = respDoc;
+    doc["type"] = "status";
+    JsonArray pumpsArr = doc["pumps"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn);
+    JsonArray motors = doc["motors"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) {
+        JsonObject m = motors.add<JsonObject>();
+        m["id"] = i + 1;
+        m["version"] = motorConfigs[i].version;
+        m["last_modified"] = motorConfigs[i].lastModified;
+        m["mode"] = !motorConfigs[i].isEnabled ? "off"
+                    : (motorConfigs[i].autoMode ? "auto" : "scheduled");
+        m["amount_ml"] = motorConfigs[i].amountMl;
+        m["threshold"] = motorConfigs[i].moistureThreshold;
+        m["min_interval_hours"] = motorConfigs[i].minIntervalHours;
+        m["calibration_dry"] = motorConfigs[i].calibrationDry;
+        m["calibration_wet"] = motorConfigs[i].calibrationWet;
+        m["last_watered"] = motorConfigs[i].lastAutoWaterEpoch;
+        m["ml_per_sec"] = motorConfigs[i].mlPerSecond > 0
+                         ? motorConfigs[i].mlPerSecond : DEFAULT_ML_PER_SECOND;
+        m["max_runtime_minutes"] = motorConfigs[i].maxRuntimeMinutes;
+        m["stop_on_disconnect"] = motorConfigs[i].stopOnDisconnect;
+        JsonArray sched = m["schedules"].to<JsonArray>();
+        for (int j = 0; j < motorConfigs[i].scheduleCount; j++) {
+            JsonObject s = sched.add<JsonObject>();
+            s["hour"] = motorConfigs[i].schedules[j].hour;
+            s["minute"] = motorConfigs[i].schedules[j].minute;
+        }
+    }
     serializeJson(doc, respBuf, sizeof(respBuf));
+    ws.textAll(respBuf); // Targeted response to everyone (safe for app)
 }
 
 void sendWsRaw(AsyncWebSocketClient *client, const char* payload) {
@@ -782,6 +1044,7 @@ void sendWsRaw(AsyncWebSocketClient *client, const char* payload) {
 
 void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     cmd.trim();
+    lastClientCommandMs = millis(); // Track client liveness
     Serial.printf("[%s] [WS] RX: %s\n", getLocalTimeStr(), cmd.c_str());
     if (cmd == "READ_SENSORS") {
         // Force an immediate sensor read + telemetry push (app open/resume).
@@ -789,6 +1052,9 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         // and must run on the main loop's stack, not this small AsyncTCP task.
         lastSensorSent = 0;
         pendingSensorRead = true;
+    } else if (cmd == "PING") {
+        // Minimal heartbeat to reset stale-client timer and confirm link.
+        sendOkResponse(client, cmd, false);
     } else if (cmd.startsWith("SYNC_MODE ")) {
         // App signals its lifecycle: foreground 1s, background 3s. Clamped so a
         // bad value can't starve or flood the stream.
@@ -797,79 +1063,67 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         if (seconds > 30) seconds = 30;
         streamCadenceMs = (unsigned long)seconds * 1000UL;
         Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums)\n", getLocalTimeStr(), seconds, streamCadenceMs);
-        respDoc.clear();
-        JsonDocument &okDoc = respDoc;
+
+        JsonDocument okDoc;
+        char localBuf[256];
         okDoc["type"] = "ok";
         okDoc["cmd"] = "SYNC_MODE";
         okDoc["cadence"] = seconds;
-        serializeJson(okDoc, respBuf, sizeof(respBuf));
-        sendWsRaw(client, respBuf);
+        serializeJson(okDoc, localBuf, sizeof(localBuf));
+        sendWsRaw(client, localBuf);
     } else if (cmd == "CAL_STREAM_ON") {
         calibrationStreamActive = true;
         Serial.println("[SENSOR] Calibration streaming ON (1s cadence)");
-        buildOkResponse(cmd, false);
-        sendWsRaw(client, respBuf);
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "CAL_STREAM_OFF") {
         calibrationStreamActive = false;
         Serial.println("[SENSOR] Calibration streaming OFF");
-        buildOkResponse(cmd, false);
-        sendWsRaw(client, respBuf);
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "TELEMETRY_PAUSE") {
         telemetryPaused = true;
         Serial.println("[SYNC] Telemetry paused (app backgrounded)");
-        buildOkResponse(cmd, false);
-        sendWsRaw(client, respBuf);
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "TELEMETRY_RESUME") {
         telemetryPaused = false;
         Serial.println("[SYNC] Telemetry resumed (app foregrounded)");
         // Force an immediate telemetry push so the app gets fresh data right away.
         lastSensorSent = 0;
         pendingSensorRead = true;
-        buildOkResponse(cmd, false);
-        sendWsRaw(client, respBuf);
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "STATUS") {
-        // Fixed-size buffer instead of String concatenation: this runs on the
-        // AsyncTCP event task where repeated String reallocations fragment the
-        // heap and risk stack/alloc failures on a freshly connected client.
-        char status[64];
-        int off = 0;
-        for (int i = 0; i < 4; i++) {
-            off += snprintf(status + off, sizeof(status) - off, "Pump%d: %s%s",
-                            i + 1, pumps[i].isOn ? "ON" : "OFF", i < 3 ? "\n" : "");
-        }
-        sendWsRaw(client, status);
+        // Defer to loop() to avoid stack overflow and JSON truncation in the
+        // AsyncTCP task.
+        pendingStatusRequest = true;
     } else if (cmd == "RESET_CONFIG") {
         preferences.begin("plantpilot", false);
         preferences.clear();
         preferences.end();
         Serial.println("[SYSTEM] Configuration Reset requested by App");
         loadConfigs(); // Re-initialize with defaults
-        buildOkResponse(cmd, false);
-        sendWsRaw(client, respBuf);
-    } else if (cmd == "PUMP_ALL_ON") {
-        for (int i = 0; i < 4; i++) requestPumpStart(i, 0, "manual");
-        buildOkResponse(cmd, true);
-        sendWsRaw(client, respBuf);
+        initChannelPolling();
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "PUMP_ALL_OFF") {
         staggeredStopPending = true;
         nextStaggeredStop = 0;
         lastStaggerTime = 0;
         // Clear any pending starts if we are doing a master stop
-        for (int i = 0; i < 4; i++) startQueue[i].pending = false;
-        buildOkResponse(cmd, true);
-        sendWsRaw(client, respBuf);
+        for (int i = 0; i < 4; i++) {
+            startQueue[i].pending = false;
+            stopQueue[i].pending = true; // Queue stop in main loop
+        }
+        sendOkResponse(client, cmd, true);
     } else if (cmd.startsWith("PUMP") && cmd.endsWith("_ON")) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
         if (id >= 0 && id < 4) requestPumpStart(id, 0, "manual");
-        buildOkResponse(cmd, true);
-        sendWsRaw(client, respBuf);
+        sendOkResponse(client, cmd, true);
     } else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
-        if (id >= 0 && id < 4) stopPump(id);
-        buildOkResponse(cmd, true);
-        sendWsRaw(client, respBuf);
+        if (id >= 0 && id < 4) {
+            stopQueue[id].pending = true; // Queue stop in main loop
+        }
+        sendOkResponse(client, cmd, true);
     }
 }
 
@@ -955,6 +1209,12 @@ void setupApi() {
             }
         }
 
+        // Sync water level from App's estimate
+        if (doc["water_level"].is<int>()) {
+            waterLevel = constrain((int)doc["water_level"], 0, 100);
+            Serial.printf("[%s] [SYNC] Water level synced: %d%%\n", getLocalTimeStr(), waterLevel);
+        }
+
         JsonArray motors = doc["motors"];
         JsonDocument response;
         JsonArray updated = response["updated"].to<JsonArray>();
@@ -980,54 +1240,75 @@ void setupApi() {
             int idx = id - 1;
             if (idx < 0 || idx >= 4) continue;
 
-            int newVersion = m["version"];
-            unsigned long incomingLastModified = m["last_modified"] | 0UL;
-                // Two-way sync rule: apply when the incoming config is newer by
-                // version OR timestamp; otherwise keep the stored (newer) config.
-                if (newVersion > motorConfigs[idx].version || newVersion == 0 ||
-                    incomingLastModified > motorConfigs[idx].lastModified) {
-                    const char* mode = m["mode"];
-                    motorConfigs[idx].isEnabled = (strcmp(mode, "off") != 0);
-                    motorConfigs[idx].autoMode = (strcmp(mode, "auto") == 0);
-                    motorConfigs[idx].amountMl = constrain((int)m["amount_ml"], 0, MAX_WATERING_ML);
-                    motorConfigs[idx].moistureThreshold = constrain((int)m["threshold"], 0, 100);
-                    motorConfigs[idx].minIntervalHours = max((int)m["min_interval_hours"], 0);
-                    motorConfigs[idx].lastAutoWaterEpoch = m["last_watered"] | 0UL;
-                    motorConfigs[idx].version = newVersion;
-                    motorConfigs[idx].lastModified = incomingLastModified;
-                    int newRate = constrain((int)m["ml_per_sec"] | DEFAULT_ML_PER_SECOND, 0, MAX_ML_PER_SECOND);
-                    int newMaxRun = max((int)m["max_runtime_minutes"] | 1, 0);
-                    bool newStopDisc = m["stop_on_disconnect"] | false;
-                    // Log individual field changes
-                    if (newRate != motorConfigs[idx].mlPerSecond)
-                        Serial.printf("[%s] [SYNC] Pump %d ml_per_sec: %d → %d\n", getLocalTimeStr(), id, motorConfigs[idx].mlPerSecond, newRate);
-                    if (newMaxRun != motorConfigs[idx].maxRuntimeMinutes)
-                        Serial.printf("[%s] [SYNC] Pump %d max_runtime: %d → %d min\n", getLocalTimeStr(), id, motorConfigs[idx].maxRuntimeMinutes, newMaxRun);
-                    if (newStopDisc != motorConfigs[idx].stopOnDisconnect)
-                        Serial.printf("[%s] [SYNC] Pump %d stop_on_disconnect: %d → %d\n", getLocalTimeStr(), id, motorConfigs[idx].stopOnDisconnect, newStopDisc);
+            int newVersion = m.containsKey("version") ? (int)m["version"] : motorConfigs[idx].version;
+            unsigned long incomingLastModified = m.containsKey("last_modified") ? (unsigned long)m["last_modified"] : motorConfigs[idx].lastModified;
+
+            // Two-way sync rule: apply when the incoming config is newer by
+            // version OR timestamp; otherwise keep the stored (newer) config.
+            // If both are the same, we still check for content changes below.
+            bool isNewer = (newVersion > motorConfigs[idx].version) ||
+                           (incomingLastModified > motorConfigs[idx].lastModified);
+
+            if (isNewer || newVersion == 0) {
+                bool changed = false;
+                const char* modeStr = m["mode"] | "off";
+                bool newEnabled = (strcmp(modeStr, "off") != 0);
+                bool newAuto = (strcmp(modeStr, "auto") == 0);
+                int newAmount = constrain((int)m["amount_ml"], 0, MAX_WATERING_ML);
+                int newThreshold = constrain((int)m["threshold"], 0, 100);
+                int newInterval = max((int)m["min_interval_hours"], 0);
+                unsigned long newLastWatered = m["last_watered"] | 0UL;
+                int newRate = constrain((int)m["ml_per_sec"] | DEFAULT_ML_PER_SECOND, 0, MAX_ML_PER_SECOND);
+                int newMaxRun = max((int)m["max_runtime_minutes"] | 1, 0);
+                bool newStopDisc = m.containsKey("stop_on_disconnect") ? (bool)m["stop_on_disconnect"] : motorConfigs[idx].stopOnDisconnect;
+
+                if (newEnabled != motorConfigs[idx].isEnabled || newAuto != motorConfigs[idx].autoMode ||
+                    newAmount != motorConfigs[idx].amountMl || newThreshold != motorConfigs[idx].moistureThreshold ||
+                    newInterval != motorConfigs[idx].minIntervalHours || newLastWatered != motorConfigs[idx].lastAutoWaterEpoch ||
+                    newRate != motorConfigs[idx].mlPerSecond || newMaxRun != motorConfigs[idx].maxRuntimeMinutes ||
+                    newStopDisc != motorConfigs[idx].stopOnDisconnect || newVersion != motorConfigs[idx].version ||
+                    incomingLastModified != motorConfigs[idx].lastModified) {
+                    changed = true;
+                }
+
+                JsonArray schedules = m["schedules"];
+                if (schedules.size() != motorConfigs[idx].scheduleCount) changed = true;
+                else {
+                    for (int i = 0; i < motorConfigs[idx].scheduleCount; i++) {
+                        if (schedules[i]["hour"] != motorConfigs[idx].schedules[i].hour ||
+                            schedules[i]["minute"] != motorConfigs[idx].schedules[i].minute) {
+                            changed = true; break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    motorConfigs[idx].isEnabled = newEnabled;
+                    motorConfigs[idx].autoMode = newAuto;
+                    motorConfigs[idx].amountMl = newAmount;
+                    motorConfigs[idx].moistureThreshold = newThreshold;
+                    motorConfigs[idx].minIntervalHours = newInterval;
+                    motorConfigs[idx].lastAutoWaterEpoch = newLastWatered;
                     motorConfigs[idx].mlPerSecond = newRate;
                     motorConfigs[idx].maxRuntimeMinutes = newMaxRun;
                     motorConfigs[idx].stopOnDisconnect = newStopDisc;
+                    motorConfigs[idx].version = newVersion;
+                    motorConfigs[idx].lastModified = incomingLastModified;
 
-                JsonArray schedules = m["schedules"];
-                motorConfigs[idx].scheduleCount = min((int)schedules.size(), 5);
-                for (int i = 0; i < motorConfigs[idx].scheduleCount; i++) {
-                    int hr = (int)schedules[i]["hour"];
-                    int mn = (int)schedules[i]["minute"];
-                    motorConfigs[idx].schedules[i].hour = constrain(hr, 0, 23);
-                    motorConfigs[idx].schedules[i].minute = constrain(mn, 0, 59);
+                    motorConfigs[idx].scheduleCount = min((int)schedules.size(), 5);
+                    for (int i = 0; i < motorConfigs[idx].scheduleCount; i++) {
+                        motorConfigs[idx].schedules[i].hour = constrain((int)schedules[i]["hour"], 0, 23);
+                        motorConfigs[idx].schedules[i].minute = constrain((int)schedules[i]["minute"], 0, 59);
+                    }
+
+                    saveMotorConfig(id);
+                    refreshChannelPolling();
+                    Serial.printf("[%s] [SYNC] Pump %d updated: mode=%s v%d lm=%lu\n",
+                        getLocalTimeStr(), id, modeStr, motorConfigs[idx].version, motorConfigs[idx].lastModified);
+                    updated.add(id);
+                } else {
+                    ignored.add(id);
                 }
-                saveMotorConfig(id);
-                Serial.printf("[%s] [SYNC] Pump %d updated: mode=%s amount=%dml threshold=%d%% "
-                    "interval=%dh rate=%dml/s cal_dry=%d cal_wet=%d max_runtime=%dmin "
-                    "stop_on_disc=%d sched=%d v%d\n",
-                    getLocalTimeStr(), id, mode, motorConfigs[idx].amountMl,
-                    motorConfigs[idx].moistureThreshold, motorConfigs[idx].minIntervalHours,
-                    motorConfigs[idx].mlPerSecond, motorConfigs[idx].calibrationDry,
-                    motorConfigs[idx].calibrationWet, motorConfigs[idx].maxRuntimeMinutes,
-                    motorConfigs[idx].stopOnDisconnect, motorConfigs[idx].scheduleCount,
-                    motorConfigs[idx].version);
-                updated.add(id);
             } else {
                 ignored.add(id);
             }
@@ -1076,6 +1357,7 @@ void setupApi() {
         motorConfigs[idx].version++;
         motorConfigs[idx].lastModified = getNow();
         saveMotorConfig(motor);
+        refreshChannelPolling();
         soilMoisture[idx] = readMoisture(idx);
         Serial.printf("[%s] [CAL] Sensor %d calibrated dry=%d wet=%d rate=%dml/s (v%d)\n",
             getLocalTimeStr(), motor, dry, wet, motorConfigs[idx].mlPerSecond, motorConfigs[idx].version);
@@ -1086,14 +1368,18 @@ void setupApi() {
         char path[32]; sprintf(path, "/api/motor/%d/water_now", m);
         server.on(path, HTTP_POST, [m](AsyncWebServerRequest *request){
             int rate = 0;
+            int amount = motorConfigs[m-1].amountMl;
             if (request->hasParam("rate")) {
                 rate = request->getParam("rate")->value().toInt();
+            }
+            if (request->hasParam("amount")) {
+                amount = request->getParam("amount")->value().toInt();
             }
             if (rate > 0 && rate <= MAX_ML_PER_SECOND) {
                 motorConfigs[m-1].mlPerSecond = rate;
                 Serial.printf("[%s] [PUMP] Rate override for Pump %d → %d ml/s\n", getLocalTimeStr(), m, rate);
             }
-            requestPumpStart(m-1, motorConfigs[m-1].amountMl, "manual");
+            requestPumpStart(m-1, amount, "manual");
             request->send(200, "application/json", "{\"status\":\"ok\"}");
         });
     }
@@ -1101,10 +1387,14 @@ void setupApi() {
 
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_CONNECTED: Serial.println("[WIFI] Connected to AP"); break;
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            Serial.printf("[%s] [WIFI] Connected to AP: %s\n", getLocalTimeStr(), WiFi.SSID().c_str());
+            break;
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            Serial.printf("[%s] [WIFI] IP: %s\n", getLocalTimeStr(), WiFi.localIP().toString().c_str());
+            Serial.printf("[%s] [WIFI] IP: %s (RSSI: %d dBm)\n", getLocalTimeStr(), WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
             wasConnected = true;
+            // Force power-save OFF for Rev 1.0 silicon stability (Modem sleep bugs)
+            WiFi.setSleep(WIFI_PS_NONE);
             // After setup-mode credentials are saved, restart 10s after getting
             // an IP so the device comes up in normal STA mode (matches the page
             // countdown).
@@ -1112,6 +1402,7 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             lastWiFiReason = info.wifi_sta_disconnected.reason;
+            cachedWifiSsid = "";
             if (wasConnected) { Serial.printf("[%s] [WIFI] Lost, Reason: %d\n", getLocalTimeStr(), lastWiFiReason); wasConnected = false; }
             break;
         default: break;
@@ -1132,12 +1423,15 @@ void setup() {
         case ESP_RST_TASK_WDT:    resetReason = "TASK_WATCHDOG"; break;
         case ESP_RST_WDT:         resetReason = "OTHER_WATCHDOG"; break;
         case ESP_RST_DEEPSLEEP:   resetReason = "DEEP_SLEEP"; break;
-        case ESP_RST_BROWNOUT:    resetReason = "BROWNOUT"; break;
+        case ESP_RST_BROWNOUT:
+            resetReason = "BROWNOUT";
+            Serial.println("[WARNING] Brownout detected! Check your power supply. Driving 4 relays may require 2A+.");
+            break;
         case ESP_RST_SDIO:        resetReason = "SDIO"; break;
         default:                  resetReason = "UNKNOWN"; break;
     }
     Serial.printf("[SYSTEM] Reset reason: %s, free heap: %u bytes\n", resetReason, ESP.getFreeHeap());
-    initStatusLed(); initRelays(); loadConfigs();
+    initStatusLed(); initRelays(); loadConfigs(); initChannelPolling();
 
     // Load persisted time and rebase against current boot millis
     preferences.begin("time", true);
@@ -1150,7 +1444,7 @@ void setup() {
     }
 
     WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
-    WiFi.setSleep(WIFI_PS_MIN_MODEM);
+    WiFi.setSleep(WIFI_PS_NONE);
     preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
     if (ssid.length() > 0) { Serial.printf("[%s] [WIFI] Target: %s\n", getLocalTimeStr(), ssid.c_str()); WiFi.begin(ssid.c_str(), pass.c_str()); }
     else { Serial.printf("[%s] [WIFI] No credentials. Setup Mode.\n", getLocalTimeStr()); startSetupMode(); }
@@ -1171,17 +1465,24 @@ void setup() {
             // Include full per-motor config in the first telemetry frame so a
             // freshly connected app gets device state without a separate request.
             motorsLastSentMs = 0;
+            // Delay the first telemetry push by 1s to avoid flooding the TCP
+            // buffer right after the handshake (PlantPilot Ready + SYNC_MODE ack).
+            firstTelemetryAfterConnectMs = millis() + 1000UL;
+            // Reset stale-client timer so the new connection gets a full grace period.
+            lastClientCommandMs = millis();
         } else if (type == WS_EVT_DISCONNECT) {
             Serial.printf("[%s] [WS] Client disconnected (total: %u)\n",
                 getLocalTimeStr(), ws.count());
-            // If any pump has stopOnDisconnect, queue a stop
-            for (int i = 0; i < 4; i++) {
-                if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
-                    Serial.printf("[%s] [PUMP] Stopping %s on disconnect (stopOnDisconnect=true)\n",
-                        getLocalTimeStr(), pumps[i].name);
-                    staggeredStopPending = true;
-                    nextStaggeredStop = 0;
-                    lastStaggerTime = 0;
+            // If all clients disconnected and any pump has stopOnDisconnect, queue a stop
+            if (ws.count() == 0) {
+                for (int i = 0; i < 4; i++) {
+                    if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
+                        Serial.printf("[%s] [PUMP] Stopping %s on disconnect (stopOnDisconnect=true)\n",
+                            getLocalTimeStr(), pumps[i].name);
+                        staggeredStopPending = true;
+                        nextStaggeredStop = 0;
+                        lastStaggerTime = 0;
+                    }
                 }
             }
         } else if (type == WS_EVT_DATA) {
@@ -1203,46 +1504,75 @@ void loop() {
     updateStatusLed();
 
     // 1. Process Global Start Queue (Power Safety - Non-blocking)
-    if (!staggeredStopPending && (loopStart - lastGlobalStart >= STAGGER_INTERVAL_MS)) {
+    // Sequential Scheduling: Only trigger a queued pump if no other motor is running.
+    if (!isMotorBusy() && !staggeredStopPending && (loopStart - lastGlobalStart >= STAGGER_INTERVAL_MS)) {
         for (int i = 0; i < 4; i++) {
             if (startQueue[i].pending) {
                 triggerPump(i, startQueue[i].amount, startQueue[i].source);
-                startQueue[i].pending = false;
+                // Only dequeue if the pump actually started
+                if (pumps[i].isOn) startQueue[i].pending = false;
                 lastGlobalStart = loopStart;
-                break; // Only start one per interval
+                break; // Only process one per interval
             }
         }
     }
 
     // 2. Process Manual Staggered Stop (UI Smoothness)
     if (staggeredStopPending && (loopStart - lastStaggerTime >= STAGGER_INTERVAL_MS)) {
-        stopPump(nextStaggeredStop);
+        requestPumpStop(nextStaggeredStop);
         nextStaggeredStop++;
         lastStaggerTime = loopStart;
         if (nextStaggeredStop >= 4) staggeredStopPending = false;
+    }
+
+    // 3. Process Individual Stop Queue (Safety/Thread-safety)
+    for (int i = 0; i < 4; i++) {
+        if (stopQueue[i].pending) {
+            stopPump(i);
+            stopQueue[i].pending = false;
+        }
+    }
+
+    // 4. Process Deferred STATUS request
+    if (pendingStatusRequest) {
+        pendingStatusRequest = false;
+        sendStatusResponse();
     }
 
     if (pendingRestart && loopStart >= restartTime) ESP.restart();
     if (WiFi.status() == WL_CONNECTED) {
         // Cache SSID on first successful connection
         if (cachedWifiSsid.length() == 0) cachedWifiSsid = WiFi.SSID();
+        didRadioReset = false; // Reset the 10min recovery flag
         static unsigned long lastNtpSync = 0;
         if (loopStart - lastNtpSync > 3600000 || lastNtpSync == 0) { lastNtpSync = loopStart; syncWithNtp(); }
     } else if (WiFi.status() != WL_CONNECTED && (WiFi.getMode() & WIFI_STA)) {
         if (lastWifiRetry == 0) lastWifiRetry = loopStart;
         unsigned long offlineMs = loopStart - lastWifiRetry;
-        // Escalating recovery: disconnect+reconnect at 10min, restart at 30min
+
+        // Escalating recovery:
+        // 1. Restart at 30min
         if (offlineMs > 1800000UL) {
             Serial.println("[WIFI] Offline 30min, restarting...");
             ESP.restart();
-        } else if (offlineMs > 600000UL) {
-            static bool didRadioReset = false;
+        }
+        // 2. Radio reset (disconnect+begin) at 10min
+        else if (offlineMs > 600000UL) {
             if (!didRadioReset) {
                 Serial.println("[WIFI] Offline 10min, radio reset...");
                 WiFi.disconnect();
                 delay(500);
                 WiFi.begin();
                 didRadioReset = true;
+            }
+        }
+        // 3. Simple begin retry at 1min (faster recovery for minor glitches)
+        else if (offlineMs > 60000UL) {
+            static unsigned long lastBeginRetry = 0;
+            if (loopStart - lastBeginRetry > 60000UL) {
+                Serial.println("[WIFI] Offline 1min, retrying begin...");
+                WiFi.begin();
+                lastBeginRetry = loopStart;
             }
         }
     } else {
@@ -1253,37 +1583,71 @@ void loop() {
         String cmd = Serial.readStringUntil('\n'); cmd.trim();
         if (cmd == "WIFI_RESET") { preferences.begin("wifi", false); preferences.clear(); preferences.end(); WiFi.disconnect(true, true); delay(1000); ESP.restart(); }
     }
-    if (WiFi.getMode() & WIFI_AP_STA) dnsServer.processNextRequest();
+    if (setupModeActive) dnsServer.processNextRequest();
 
     // Clean up dead TCP clients (only removes already-disconnected sockets,
     // does not timeout alive connections).
     ws.cleanupClients();
 
-    // Low-heap guard: logs once per threshold crossing so the serial shows
-    // degradation (fragmentation / leak) before any send path can fail.
+    // Low-heap guard: logs once per threshold crossing and triggers a protective
+    // restart if the heap stays critically low for too long (5 minutes).
     {
         static unsigned long lastLowHeapLog = 0;
+        static unsigned long criticalHeapStart = 0;
         static bool heapWarned = false;
         size_t freeHeap = ESP.getFreeHeap();
         size_t largest = ESP.getMaxAllocHeap();
+
+        // Critical thresholds: < 48KB total or < 16KB largest block
         if (freeHeap < 48000 || largest < 16000) {
+            if (criticalHeapStart == 0) criticalHeapStart = loopStart;
+
             if (!heapWarned || (loopStart - lastLowHeapLog > 60000)) {
                 heapWarned = true;
                 lastLowHeapLog = loopStart;
-                Serial.printf("[%s] [SYS] WARNING: free heap=%u, largest block=%u\n",
+                Serial.printf("[%s] [SYS] WARNING: critical heap (free=%u, largest=%u)\n",
                     getLocalTimeStr(), (unsigned)freeHeap, (unsigned)largest);
+            }
+
+            // Protective restart after 5 minutes of persistent critical low heap
+            if (loopStart - criticalHeapStart > 300000UL) {
+                Serial.println("[SYS] FATAL: Heap critical for 5min. Restarting for health.");
+                ESP.restart();
             }
         } else {
             heapWarned = false;
+            criticalHeapStart = 0;
         }
     }
 
     updatePumps();
 
+    // Stale client detection: if a WS client is connected but hasn't sent any
+    // command for STALE_CLIENT_TIMEOUT_MS, treat it as dead and trigger
+    // stopOnDisconnect logic.  Catches silent disconnects (app killed/crashed
+    // without clean WebSocket close).
+    // Using (long) cast handles potential millis() wrap and prevents underflow
+    // when lastClientCommandMs is updated just after loopStart is captured.
+    if (ws.count() > 0 && lastClientCommandMs > 0 &&
+        (long)(loopStart - lastClientCommandMs) > (long)STALE_CLIENT_TIMEOUT_MS) {
+        Serial.printf("[%s] [WS] Stale client detected (no commands for %lus)\n",
+            getLocalTimeStr(), (loopStart - lastClientCommandMs) / 1000);
+        for (int i = 0; i < 4; i++) {
+            if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
+                Serial.printf("[%s] [PUMP] Stopping %s on stale client (stopOnDisconnect=true)\n",
+                    getLocalTimeStr(), pumps[i].name);
+                staggeredStopPending = true;
+                nextStaggeredStop = 0;
+                lastStaggerTime = 0;
+            }
+        }
+        lastClientCommandMs = loopStart; // reset to avoid re-triggering every loop
+    }
+
     static unsigned long lastTele = 0;
     unsigned long telemetryMs = calibrationStreamActive ? 1000UL
                     : (ws.count() > 0 ? streamCadenceMs : 60000UL);
-    if (!telemetryPaused && (pendingSensorRead || (loopStart - lastTele > telemetryMs))) {
+    if (!telemetryPaused && (pendingSensorRead || (loopStart >= firstTelemetryAfterConnectMs && loopStart - lastTele > telemetryMs))) {
         // READ_SENSORS from the WS handler defers the heavy JSON build to here,
         // on the main loop stack. Also reset the timer so the forced push isn't
         // immediately followed by a regular cadence push.

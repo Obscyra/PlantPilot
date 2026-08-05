@@ -152,8 +152,8 @@ Messages from the app (commands):
 | `READ_SENSORS` | Force an immediate sensor read + telemetry push |
 | `SYNC_MODE <sec>` | Set telemetry cadence (app lifecycle: 1s foreground / 3s background, clamped 1–30) |
 | `CAL_STREAM_ON` / `CAL_STREAM_OFF` | Toggle real-time calibration sensor streaming (1s) |
-| `PUMP{A–D}_ON` / `PUMP{A–D}_OFF` | Toggle a single pump (also accepts `PUMP{1–4}`) |
-| `PUMP_ALL_ON` / `PUMP_ALL_OFF` | Toggle all pumps |
+| `PUMP{A–D}_ON` / `PUMP{A–D}_OFF` | Toggle a single pump (Mutually Exclusive: turning one ON stops any other) |
+| `PUMP_ALL_OFF` | Stop all pumps immediately |
 | `RESET_CONFIG` | Wipe NVS config back to defaults |
 
 On connect, the device sends the banner `PlantPilot Ready`.

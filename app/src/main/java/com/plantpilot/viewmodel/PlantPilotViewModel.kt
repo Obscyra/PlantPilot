@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -51,6 +52,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     private val _deviceState = MutableStateFlow(MockData.defaultDeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
 
+    /** Global tracking of which plant is currently being watered (by ID).
+     *  Used to show the watering overlay across all screens consistently. */
+    private val _isWateringPlantId = MutableStateFlow<String?>(null)
+    val isWateringPlantId: StateFlow<String?> = _isWateringPlantId.asStateFlow()
+
     // Single source of truth for ESP32 connectivity: the live WebSocket state,
     // updated by socket callbacks, heartbeat, lifecycle checks and post-action
     // responses. UI must derive connection state from this flow, never from
@@ -73,7 +79,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     // Command guards (canSendCommands / canDisplayLastKnownData) must continue
     // reading the real connectionState directly — never this.
     val displayConnectionState: StateFlow<ConnectionState> =
-        ConnectionStateHelper.debouncedConnectionState(connectionState, viewModelScope)
+        ConnectionStateHelper.debouncedConnectionState(
+            connectionState,
+            viewModelScope,
+            hardwareRepository.wateringInProgressState
+        )
 
     val telemetry: StateFlow<DeviceStatusResponse?> = hardwareRepository.telemetry
 
@@ -103,9 +113,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     var isRefreshingDevice by mutableStateOf(value = false)
         private set
 
-    val isSyncing: Boolean get() = syncCoordinator.isSyncing
-    val isConfigDirty: Boolean get() = syncCoordinator.isConfigDirty
-
     var showOnboarding by mutableStateOf(value = true)
         private set
 
@@ -115,16 +122,18 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     private val pendingWatering = ConcurrentHashMap<Int, CompletableDeferred<Boolean>>()
 
     private val historyManager: HistoryManager = HistoryManager(
-        history = _history,
-        plants = _plants,
+        historyFlow = _history,
+        plantsFlow = _plants,
         scope = viewModelScope,
         settingsManager = settingsManager,
         notificationHelper = notificationHelper,
         onWateringFinished = { motor -> pendingWatering.remove(motor)?.complete(true) },
         onWaterUsed = { ml ->
-            _deviceState.value = _deviceState.value.copy(
-                estimatedWaterMl = (_deviceState.value.estimatedWaterMl - ml).coerceAtLeast(0)
-            )
+            _deviceState.update { current ->
+                current.copy(
+                    estimatedWaterMl = (current.estimatedWaterMl - ml).coerceAtLeast(0)
+                )
+            }
             viewModelScope.launch { settingsManager.saveDeviceState(_deviceState.value) }
         },
     )
@@ -138,19 +147,28 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         repository = repository,
         historyManager = historyManager,
         canSendCommands = { canSendCommands },
+        getWaterLevelPct = {
+            val state = _deviceState.value
+            if (state.tankCapacityMl > 0) {
+                (state.estimatedWaterMl * 100) / state.tankCapacityMl
+            } else null
+        },
         persistPlants = { configManager.persistPlants() },
     )
 
+    val isSyncing: StateFlow<Boolean> = syncCoordinator.isSyncing
+    val isConfigDirty: StateFlow<Boolean> = syncCoordinator.isConfigDirty
+
     private val configManager: PlantConfigManager = PlantConfigManager(
-        plants = _plants,
+        plantsFlow = _plants,
         scope = viewModelScope,
         settingsManager = settingsManager,
         markConfigDirty = { autoSync -> syncCoordinator.markConfigDirty(autoSync) },
     )
 
     private val telemetryProcessor: TelemetryProcessor = TelemetryProcessor(
-        deviceState = _deviceState,
-        plants = _plants,
+        deviceStateFlow = _deviceState,
+        plantsFlow = _plants,
         settings = _settings,
         scope = viewModelScope,
         settingsManager = settingsManager,
@@ -180,7 +198,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 val reachable = state == ConnectionState.Connected || state == ConnectionState.Reconnecting
                 val justReconnected = reachable && !wasPreviouslyConnected
                 wasPreviouslyConnected = reachable
-                _deviceState.value = _deviceState.value.copy(isConnected = reachable)
+                _deviceState.update { it.copy(isConnected = reachable) }
                 if (justReconnected) {
                     // Two-way sync: pull whatever is newer on the device, push what's newer here.
                     syncCoordinator.performTwoWaySync()
@@ -191,15 +209,17 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         // Load persisted settings
         viewModelScope.launch {
             settingsManager.deviceStateFlow.collect { partial ->
-                _deviceState.value = _deviceState.value.copy(
-                    deviceName = partial.name,
-                    deviceIp = partial.ip,
-                    wifiSsid = partial.ssid,
-                    tankCapacityMl = partial.capacity,
-                    lowWaterThreshold = partial.threshold,
-                    // Fresh install has no persisted estimate -> assume full tank.
-                    estimatedWaterMl = partial.estimatedWaterMl ?: partial.capacity
-                )
+                _deviceState.update { current ->
+                    current.copy(
+                        deviceName = partial.name,
+                        deviceIp = partial.ip,
+                        wifiSsid = partial.ssid,
+                        tankCapacityMl = partial.capacity,
+                        lowWaterThreshold = partial.threshold,
+                        // Fresh install has no persisted estimate -> assume full tank.
+                        estimatedWaterMl = partial.estimatedWaterMl ?: partial.capacity
+                    )
+                }
                 NetworkModule.updateBaseUrl(partial.ip)
 
                 // Maintain WebSocket connection to current IP
@@ -214,25 +234,23 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             settingsManager.appSettingsFlow.collect { _settings.value = it }
         }
 
-        // Read the persisted onboarding flag synchronously before the first
-        // frame is composed, so the tutorial only ever shows on the very first
-        // launch — never a flash on subsequent launches.
+        // Hydrate persisted plants (schedules/config survive full app restarts).
+        viewModelScope.launch {
+            settingsManager.plantsFlow.first()?.let { saved ->
+                _plants.update { saved }
+            }
+            // Once the first real hydration is done, clear the loading flag.
+            // This prevents the "flash of empty mocks" on startup.
+            isLoading = false
+        }
+
+        // Read the persisted onboarding flag synchronously
         runBlocking {
             showOnboarding = !settingsManager.onboardingCompletedFlow.first()
         }
 
         viewModelScope.launch {
             settingsManager.historyFlow.collect { _history.value = it }
-        }
-
-        // Load persisted plants (schedules/config survive full app restarts).
-        // Falls back to MockData on a truly fresh install (never-saved).
-        // Hydrated once: DataStore's plants value only ever changes from this
-        // process, and a continuous collect would re-emit the last *persisted*
-        // (stale-moisture) plants on every unrelated DataStore write — e.g. the
-        // 2s telemetry snapshot — clobbering live moisture in memory.
-        viewModelScope.launch {
-            settingsManager.plantsFlow.first()?.let { _plants.value = it }
         }
 
         // Observe hardware events (History tracking)
@@ -267,14 +285,18 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         // Periodic poll: while offline, actively re-check the ESP32 so the UI
         // connection state recovers as soon as the device is reachable again
         // (independent of the WebSocket reconnect backoff).
+        //
+        // Runs when NOT Connected and NOT Connecting — covers Reconnecting,
+        // Disconnected, and Failed states.  This fixes the "app opened first,
+        // then ESP boots" scenario where canDisplayLastKnownData is true during
+        // Reconnecting and the old guard skipped the poll entirely.
         viewModelScope.launch {
             while (true) {
                 delay(POLL_INTERVAL_MS)
-                if (!canDisplayLastKnownData) {
+                val state = connectionState.value
+                if (state != ConnectionState.Connected && state != ConnectionState.Connecting) {
                     val ip = _deviceState.value.deviceIp
                     if (ip.isNotBlank()) {
-                        // Silently re-check the ESP32 so the UI recovers as soon as
-                        // the device is reachable; the status chip communicates state.
                         if (liveCheck()) connectToDevice()
                     }
                 }
@@ -293,16 +315,14 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         showOnboarding = true
     }
 
-    fun refreshData() {
-        viewModelScope.launch {
-            isRefreshingDevice = true
-            val ok = liveCheck()
-            if (ok) {
-                if (!canDisplayLastKnownData) connectToDevice()
-                syncCoordinator.performTwoWaySync()
-            }
-            isRefreshingDevice = false
+    suspend fun refreshData() {
+        isRefreshingDevice = true
+        val ok = liveCheck()
+        if (ok) {
+            if (!canDisplayLastKnownData) connectToDevice()
+            syncCoordinator.performTwoWaySync()
         }
+        isRefreshingDevice = false
     }
 
     /**
@@ -324,12 +344,22 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     /** Called from MainActivity ON_RESUME so the app re-checks when foregrounded. */
     fun onAppResumed() {
         viewModelScope.launch {
+            val state = connectionState.value
+            // 1. Force an immediate reconnect attempt if not already handshake-in-progress.
+            if (state != ConnectionState.Connected && state != ConnectionState.Connecting) {
+                connectToDevice()
+                // Brief pause to let the TCP/WS task start before firing HTTP probes
+                delay(150)
+            }
+            
+            // 2. HTTP connectivity check (lightweight handshake)
             val ok = liveCheck()
             if (ok) {
                 if (canDisplayLastKnownData) {
                     syncCoordinator.performTwoWaySync()
                     requestSensorReading()
                 } else {
+                    // If HTTP works but WebSocket is still offline, nudge it again.
                     connectToDevice()
                 }
             }
@@ -385,30 +415,25 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     suspend fun waterPlant(plantId: String): Boolean {
-        // Refuse immediately when offline — callers disable the button, and this
-        // guards any path that slips through (no click-then-loading-then-fail).
+        // Refuse immediately when offline
         if (!canSendCommands) {
             _commandBlockedEvents.trySend("Can't water — device offline")
             return false
         }
         val plant = _plants.value.find { it.id == plantId } ?: return false
 
+        _isWateringPlantId.value = plantId
         notificationHelper.showWateringStarted(plant.name)
 
-        // Create deferred BEFORE the HTTP request to avoid race condition
-        // with the watering_finished WebSocket event
+        // Create deferred BEFORE the HTTP request
         val deferred = CompletableDeferred<Boolean>()
         pendingWatering[plant.motorNumber] = deferred
 
-        // A brief link hiccup while the relay clicks (shared power rail) is
-        // common, so mask it: the disconnect debounce won't flip to
-        // "Reconnecting" while watering is in flight.
         hardwareRepository.setWateringInProgress(true)
 
         return try {
-            val result = repository.waterNow(plant.motorNumber, plant.mlPerSec)
+            val result = repository.waterNow(plant.motorNumber, plant.mlPerSec, plant.waterAmountMl)
             if (result.isSuccess) {
-                // Wait for the actual watering_finished event from the firmware (up to 60s timeout)
                 try {
                     withTimeoutOrNull(60_000L) {
                         deferred.await()
@@ -425,15 +450,18 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             false
         } finally {
             hardwareRepository.setWateringInProgress(false)
+            _isWateringPlantId.value = null
         }
     }
 
     fun syncConfigWithDevice(silent: Boolean = false, force: Boolean = false) {
-        syncCoordinator.syncConfigWithDevice(silent, force)
+        viewModelScope.launch {
+            syncCoordinator.syncConfigWithDevice(silent, force)
+        }
     }
 
     fun updatePlant(plantId: String, update: (Plant) -> Plant) {
-        configManager.updatePlant(plantId, update)
+        configManager.updatePlant(plantId, autoSync = true, update = update)
     }
 
     fun updateWateringMode(plantId: String, mode: WateringMode) {
@@ -477,7 +505,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     fun updatePumpFlowRate(mlPerSec: Int) {
         updateSettings { it.copy(pumpFlowRateMlPerSec = mlPerSec) }
         hardwareRepository.logUserAction("Settings: Pump flow rate → ${mlPerSec} ml/s")
-        _plants.value = _plants.value.map { it.copy(mlPerSec = mlPerSec) }
+        _plants.update { current -> current.map { it.copy(mlPerSec = mlPerSec) } }
         configManager.persistPlants()
         syncCoordinator.markConfigDirty(autoSync = true)
     }
@@ -508,16 +536,14 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             // 1. Wipe ESP32 NVS config data via WebSocket command
             hardwareRepository.sendCommand("RESET_CONFIG")
 
-            // 2. Small delay to let the ESP32 finish NVS clear and reload defaults
+            // 2. Small delay to let the ESP32 finish NVS clear
             delay(800)
 
-            // 3. Force push the latest app data to the "wiped" device.
-            // We bump timestamps so the app's config is guaranteed to be "newer"
-            // than the device defaults (which will have last_modified = 0).
-            _plants.value = _plants.value.map {
-                it.copy(
-                    lastUpdated = System.currentTimeMillis()
-                )
+            // 3. Force push the latest app data.
+            _plants.update { current ->
+                current.map {
+                    it.copy(lastUpdated = System.currentTimeMillis())
+                }
             }
 
             // Perform a full force sync
@@ -530,7 +556,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         if (canDisplayLastKnownData) {
             disconnectFromDevice()
         } else {
-            refreshData()
+            viewModelScope.launch { refreshData() }
         }
     }
 
@@ -548,15 +574,16 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateDeviceState(update: (DeviceState) -> DeviceState) {
         val oldIp = _deviceState.value.deviceIp
-        val newState = update(_deviceState.value)
-
-        if (newState.deviceIp != oldIp && newState.deviceIp.isNotBlank()) {
-            NetworkModule.updateBaseUrl(newState.deviceIp)
+        _deviceState.update { current ->
+            val next = update(current)
+            if (next.deviceIp != oldIp && next.deviceIp.isNotBlank()) {
+                NetworkModule.updateBaseUrl(next.deviceIp)
+            }
+            next
         }
-        _deviceState.value = newState
 
         viewModelScope.launch {
-            settingsManager.saveDeviceState(newState)
+            settingsManager.saveDeviceState(_deviceState.value)
         }
     }
 

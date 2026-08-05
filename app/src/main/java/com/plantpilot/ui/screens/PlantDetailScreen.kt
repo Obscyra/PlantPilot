@@ -15,6 +15,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.focus.onFocusChanged
 import com.plantpilot.R
 import com.plantpilot.model.*
 import com.plantpilot.ui.components.*
@@ -48,6 +49,7 @@ fun PlantDetailScreen(
     }
 
     var editableName by remember(plant.name) { mutableStateOf(plant.name) }
+    var editableNameFocused by remember { mutableStateOf(false) }
     var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
     var editableThreshold by remember(plant.moistureThreshold) { mutableFloatStateOf(plant.moistureThreshold.toFloat()) }
     var editableMinInterval by remember(plant.minIntervalHours) { mutableFloatStateOf(plant.minIntervalHours.toFloat()) }
@@ -56,7 +58,6 @@ fun PlantDetailScreen(
     var editingSchedule by remember { mutableStateOf<WateringSchedule?>(null) }
     var showWaterNowDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
-    var isWatering by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -108,12 +109,16 @@ fun PlantDetailScreen(
             // Plant name
             OutlinedTextField(
                 value = editableName,
-                onValueChange = {
-                    editableName = it
-                    viewModel.updatePlantName(plantId, it)
-                },
+                onValueChange = { editableName = it },
                 label = { Text("Plant Name") },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { state ->
+                        if (!state.isFocused && editableName != plant.name) {
+                            viewModel.updatePlantName(plantId, editableName)
+                        }
+                        editableNameFocused = state.isFocused
+                    },
                 singleLine = true
             )
 
@@ -472,16 +477,8 @@ fun PlantDetailScreen(
             confirmText = "Water",
             onConfirm = {
                 showWaterNowDialog = false
-                // Guard against a connection dropping while the dialog was open.
                 if (canSendCommands) {
-                    isWatering = true
-                    scope.launch {
-                        // Fire the actual watering in the background
-                        scope.launch { viewModel.waterPlant(plantId) }
-                        // Animation lasts exactly 3 seconds regardless of watering duration
-                        kotlinx.coroutines.delay(3000)
-                        isWatering = false
-                    }
+                    scope.launch { viewModel.waterPlant(plantId) }
                 }
             },
             onDismiss = { showWaterNowDialog = false }
@@ -500,10 +497,5 @@ fun PlantDetailScreen(
             },
             onDismiss = { showDeleteDialog = false }
         )
-    }
-
-    // Watering overlay
-    if (isWatering) {
-        WateringOverlay(plantName = plant.name)
     }
 }

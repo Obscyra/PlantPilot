@@ -120,13 +120,6 @@ fun PumpTestingScreen(
                     }
                 }
 
-                // Master All Pumps Switch
-                AllPumpsRow(
-                    pumpStates = pumpStates,
-                    enabled = canSendCommands,
-                    viewModel = viewModel
-                )
-
                 // Pump Controls - Compact Rows
                 PumpRow(
                     id = 1, icon = Icons.Default.WaterDrop,
@@ -200,72 +193,6 @@ fun PumpTestingScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun AllPumpsRow(
-    pumpStates: Map<Int, Boolean>,
-    enabled: Boolean,
-    viewModel: PumpTestViewModel
-) {
-    val allOn = pumpStates.values.all { it }
-    val anyOn = pumpStates.values.any { it }
-    val onCount = pumpStates.values.count { it }
-    val activeColor = MaterialTheme.colorScheme.primary
-
-    Surface(
-        color = if (allOn) activeColor.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceContainer,
-        shape = MaterialTheme.shapes.medium,
-        border = if (allOn) androidx.compose.foundation.BorderStroke(1.dp, activeColor.copy(alpha = 0.5f)) else null,
-        modifier = Modifier.bounceClick(),
-        onClick = { if (enabled) viewModel.turnAllPumps(!allOn) }
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (anyOn) activeColor.copy(alpha = 0.15f)
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Power,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = if (anyOn) activeColor else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "All Pumps",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (anyOn) activeColor else MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    if (allOn) "All pumps ON"
-                    else if (anyOn) "$onCount of 4 pumps ON"
-                    else "All pumps OFF",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Switch(
-                checked = allOn,
-                onCheckedChange = null,
-                enabled = enabled
-            )
         }
     }
 }

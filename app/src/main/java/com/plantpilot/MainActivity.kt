@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -30,6 +31,7 @@ import androidx.navigation.navArgument
 import com.plantpilot.navigation.Screen
 import com.plantpilot.navigation.bottomNavItems
 import com.plantpilot.ui.components.DeviceConnectionDialog
+import com.plantpilot.ui.components.WateringOverlay
 import com.plantpilot.ui.screens.*
 import com.plantpilot.ui.theme.PlantPilotTheme
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -40,6 +42,7 @@ class MainActivity : ComponentActivity() {
     private val hardwareConnection get() = (application as PlantPilotApp).hardwareConnection
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
@@ -70,6 +73,7 @@ class MainActivity : ComponentActivity() {
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     startForegroundService(Intent(this, SyncService::class.java))
+                    hardwareConnection.setIsBackgrounded(false)
                     hardwareConnection.resumeTelemetry()
                     hardwareConnection.setStreamCadence(viewModel.settings.value.sensorCadenceSec)
                 }
@@ -79,6 +83,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.onAppResumed()
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    hardwareConnection.setIsBackgrounded(true)
                     hardwareConnection.pauseTelemetry()
                 }
                 else -> {}
@@ -115,11 +120,13 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
         var showConnectionDialog by remember { mutableStateOf(false) }
         val onStatusChipClick: () -> Unit = {
             // Tapping the chip: push any pending local config first when
-            // connected, then surface the shared connect/disconnect dialog.
-            if (viewModel.isConfigDirty && viewModel.canSendCommands) {
+            // connected. If we start a sync, we don't necessarily need to
+            // show the connection dialog immediately.
+            if (viewModel.isConfigDirty.value && viewModel.canSendCommands) {
                 viewModel.syncConfigWithDevice()
+            } else {
+                showConnectionDialog = true
             }
-            showConnectionDialog = true
         }
 
         Scaffold(
@@ -161,15 +168,20 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 label = "nav_host_bottom_padding"
             )
 
-            NavHost(
-                navController = navController,
-                startDestination = Screen.Home.route,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(
-                        top = 0.dp,
-                        bottom = bottomPadding
-                    ),
+            val isWateringPlantId by viewModel.isWateringPlantId.collectAsState()
+            val plants by viewModel.plants.collectAsState()
+            val wateringPlantName = plants.find { it.id == isWateringPlantId }?.name ?: ""
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.Home.route,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            top = 0.dp,
+                            bottom = bottomPadding
+                        ),
                 enterTransition = {
                     val initialRoute = initialState.destination.route
                     val targetRoute = targetState.destination.route
@@ -347,18 +359,23 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                     )
                 }
             }
-        }
 
-        // Shared connection dialog, reachable from the status chip on any tab.
-        if (showConnectionDialog) {
-            val dialogConnState by viewModel.displayConnectionState.collectAsState()
-            DeviceConnectionDialog(
-                connectionState = dialogConnState,
-                deviceIp = deviceState.deviceIp,
-                onConnect = { viewModel.connectToDevice() },
-                onDisconnect = { viewModel.disconnectFromDevice() },
-                onDismiss = { showConnectionDialog = false }
-            )
+            if (isWateringPlantId != null) {
+                WateringOverlay(plantName = wateringPlantName)
+            }
         }
     }
+
+    // Shared connection dialog, reachable from the status chip on any tab.
+    if (showConnectionDialog) {
+        val dialogConnState by viewModel.displayConnectionState.collectAsState()
+        DeviceConnectionDialog(
+            connectionState = dialogConnState,
+            deviceIp = deviceState.deviceIp,
+            onConnect = { viewModel.connectToDevice() },
+            onDisconnect = { viewModel.disconnectFromDevice() },
+            onDismiss = { showConnectionDialog = false }
+        )
+    }
+}
 }

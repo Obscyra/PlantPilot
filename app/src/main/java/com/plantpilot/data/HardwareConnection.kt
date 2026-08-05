@@ -16,6 +16,7 @@ interface HardwareConnection {
     val pumpStates: StateFlow<Map<Int, Boolean>>
     val hardwareEvents: SharedFlow<HardwareEvent>
     val logs: SharedFlow<String>
+    val wateringInProgressState: StateFlow<Boolean>
 
     fun connect(url: String)
     fun disconnect()
@@ -28,6 +29,10 @@ interface HardwareConnection {
 
     /** Tells the ESP32 to resume pushing telemetry frames (app foregrounded). */
     fun resumeTelemetry()
+
+    /** Tells the connection whether the app is in foreground or background.
+     *  Used to optimize heartbeat payloads and interval. */
+    fun setIsBackgrounded(active: Boolean)
 
     /** Marks that a watering is in flight so a brief link hiccup during the
      *  relay cycle doesn't flip the UI to "Reconnecting". */

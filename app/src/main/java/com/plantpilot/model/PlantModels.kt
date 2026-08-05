@@ -77,7 +77,8 @@ data class DeviceState(
     val waterTankSensorValue: Int, // mock sensor reading 0-1023
     val tankCapacityMl: Int,
     val lowWaterThreshold: Int,    // 0-4 level threshold
-    val estimatedWaterMl: Int = 0  // App-tracked remaining water, full on fresh install
+    val estimatedWaterMl: Int = 0, // App-tracked remaining water, full on fresh install
+    val queuedPumps: List<Boolean> = listOf(false, false, false, false)
 )
 
 data class AppSettings(

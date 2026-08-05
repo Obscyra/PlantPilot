@@ -80,10 +80,9 @@ fun ConnectionStatusChip(
     }
 
     Surface(
-        onClick = onClick,
         shape = RoundedCornerShape(12.dp),
         color = containerColor,
-        modifier = modifier.bounceClick()
+        modifier = modifier.bounceClick(onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -123,8 +122,8 @@ fun ConnectionStatusChip(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.displayConnectionState.collectAsState()
-    val isSyncing = viewModel.isSyncing
-    val isConfigDirty = viewModel.isConfigDirty
+    val isSyncing by viewModel.isSyncing.collectAsState()
+    val isConfigDirty by viewModel.isConfigDirty.collectAsState()
     ConnectionStatusChip(
         connectionState = state,
         isSyncing = isSyncing,
