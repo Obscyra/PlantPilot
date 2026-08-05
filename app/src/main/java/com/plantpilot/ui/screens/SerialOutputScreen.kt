@@ -83,12 +83,18 @@ fun SerialOutputScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                PulsingDot(isVisible = canDisplayLastKnownData)
+                PulsingDot(isVisible = canSendCommands)
                 Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = { viewModel.clearLogs() }) {
+                    Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Clear Logs", style = MaterialTheme.typography.labelSmall)
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 TextButton(onClick = { viewModel.refreshStatus() }, enabled = canSendCommands) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Refresh Status", style = MaterialTheme.typography.labelSmall)
+                    Text("Refresh", style = MaterialTheme.typography.labelSmall)
                 }
             }
             

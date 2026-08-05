@@ -1,7 +1,9 @@
 package com.plantpilot.ui.screens
 
+import com.plantpilot.BuildConfig
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -19,12 +21,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.plantpilot.R
-import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DeviceState
 import com.plantpilot.ui.components.ConnectionStatusChip
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -272,23 +274,6 @@ fun SettingsScreen(
                                 tankCapacityFocused = state.isFocused
                             },
                         singleLine = true
-                    )
-
-                    Text(
-                        text = "Low water alert at level ${deviceState.lowWaterThreshold}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    var editableThreshold by remember(deviceState.lowWaterThreshold) { mutableFloatStateOf(deviceState.lowWaterThreshold.toFloat()) }
-                    Slider(
-                        value = editableThreshold,
-                        onValueChange = { editableThreshold = it },
-                        onValueChangeFinished = {
-                            viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = editableThreshold.toInt()) }
-                        },
-                        valueRange = 0f..4f,
-                        steps = 3,
-                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -578,14 +563,14 @@ fun SettingsScreen(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(if (canDisplayLastKnownData) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant),
+                                    .background(if (canSendCommands) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.DeleteForever,
                                     contentDescription = null,
                                     modifier = Modifier.size(22.dp),
-                                    tint = if (canDisplayLastKnownData) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = if (canSendCommands) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Spacer(modifier = Modifier.width(12.dp))
@@ -594,7 +579,7 @@ fun SettingsScreen(
                                     text = "Factory Reset Config",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (canDisplayLastKnownData) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (canSendCommands) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
@@ -603,8 +588,8 @@ fun SettingsScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            if (!canDisplayLastKnownData) {
-                                Text("Offline", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                            if (!canSendCommands) {
+                                Text("Offline", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -667,7 +652,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("Version", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                        Text("1.0.0", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
 
                     HorizontalDivider()
@@ -696,6 +681,7 @@ fun SettingsScreen(
                                 githubUrl = "https://github.com/Obscyra",
                                 discordUrl = "https://discord.com/users/738800534793879584",
                                 linkedinUrl = "https://www.linkedin.com/in/fahimshahriar-sec/",
+                                avatarResId = R.drawable.fahim,
                                 onLinkClick = { uriHandler.openUri(it) }
                             )
 
@@ -706,6 +692,18 @@ fun SettingsScreen(
                                 githubUrl = "https://github.com/M4H1M",
                                 discordUrl = "https://discord.com/users/730070706028806185",
                                 linkedinUrl = "https://www.linkedin.com/",
+                                avatarResId = R.drawable.mahim,
+                                onLinkClick = { uriHandler.openUri(it) }
+                            )
+
+                            DeveloperCard(
+                                name = "Mehedi Hasan",
+                                role = "Financial Sponsor",
+                                tldr = "Funding & Budget Management",
+                                githubUrl = "https://github.com/mehedibuilds",
+                                discordUrl = "https://discord.com/users/1443995928015929406",
+                                linkedinUrl = "https://www.linkedin.com/in/mehedi-hasan-diu?utm_source=share_via&utm_content=profile&utm_medium=member_android",
+                                avatarResId = R.drawable.mehedi,
                                 onLinkClick = { uriHandler.openUri(it) }
                             )
                         }
@@ -796,6 +794,7 @@ private fun DeveloperCard(
     githubUrl: String,
     discordUrl: String,
     linkedinUrl: String,
+    avatarResId: Int? = null,
     onLinkClick: (String) -> Unit
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -803,6 +802,8 @@ private fun DeveloperCard(
     // Initials for the avatar badge (e.g. "Mahim Chowdhury Miraj" -> "MC").
     val initials = name.split(" ").filter { it.isNotBlank() }
         .joinToString("") { it.firstOrNull()?.uppercase() ?: "" }.take(2)
+
+    val avatarPainter = avatarResId?.let { painterResource(id = it) }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -845,12 +846,23 @@ private fun DeveloperCard(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = initials,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF0D2D00)
-                    )
+                    if (avatarPainter != null) {
+                        Image(
+                            painter = avatarPainter,
+                            contentDescription = name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape)
+                        )
+                    } else {
+                        Text(
+                            text = initials,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF0D2D00)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(16.dp))
@@ -875,31 +887,40 @@ private fun DeveloperCard(
                 }
             }
 
-            HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f))
+            val hasLinks = githubUrl.isNotBlank() || linkedinUrl.isNotBlank() || discordUrl.isNotBlank()
+            if (hasLinks) {
+                HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f))
 
-            // Social links as icon-only circular buttons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SocialIconButton(
-                    painterResourceId = R.drawable.ic_github,
-                    tint = scheme.onSurface,
-                    onClick = { onLinkClick(githubUrl) }
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                SocialIconButton(
-                    painterResourceId = R.drawable.ic_linkedin,
-                    tint = scheme.onSurface,
-                    onClick = { onLinkClick(linkedinUrl) }
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                SocialIconButton(
-                    painterResourceId = R.drawable.ic_discord,
-                    tint = scheme.onSurface,
-                    onClick = { onLinkClick(discordUrl) }
-                )
+                // Social links as icon-only circular buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (githubUrl.isNotBlank()) {
+                        SocialIconButton(
+                            painterResourceId = R.drawable.ic_github,
+                            tint = scheme.onSurface,
+                            onClick = { onLinkClick(githubUrl) }
+                        )
+                    }
+                    if (linkedinUrl.isNotBlank()) {
+                        if (githubUrl.isNotBlank()) Spacer(modifier = Modifier.width(16.dp))
+                        SocialIconButton(
+                            painterResourceId = R.drawable.ic_linkedin,
+                            tint = scheme.onSurface,
+                            onClick = { onLinkClick(linkedinUrl) }
+                        )
+                    }
+                    if (discordUrl.isNotBlank()) {
+                        if (githubUrl.isNotBlank() || linkedinUrl.isNotBlank()) Spacer(modifier = Modifier.width(16.dp))
+                        SocialIconButton(
+                            painterResourceId = R.drawable.ic_discord,
+                            tint = scheme.onSurface,
+                            onClick = { onLinkClick(discordUrl) }
+                        )
+                    }
+                }
             }
         }
     }

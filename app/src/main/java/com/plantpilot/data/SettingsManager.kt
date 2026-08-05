@@ -60,7 +60,7 @@ class SettingsManager(private val context: Context) {
             useMetricUnits = prefs[USE_METRIC] ?: true,
             use24HourFormat = prefs[USE_24H] ?: false,
             maxRuntimeMinutes = prefs[MAX_RUNTIME] ?: 1,
-            sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 3,
+            sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 12,
             pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10
         )
     }

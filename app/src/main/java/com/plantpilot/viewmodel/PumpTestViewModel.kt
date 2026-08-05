@@ -99,7 +99,7 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
         }
         val now = System.currentTimeMillis()
         val lastTime = lastToggleTime[pumpId] ?: 0L
-        if (now - lastTime < 120) return // Ignore rapid accidental double-taps
+        if (now - lastTime < 300) return // Ignore rapid accidental double-taps (300ms throttle)
         lastToggleTime[pumpId] = now
 
         val letter = when (pumpId) { 1 -> "A"; 2 -> "B"; 3 -> "C"; 4 -> "D"; else -> "$pumpId" }
@@ -113,5 +113,9 @@ class PumpTestViewModel(application: Application) : AndroidViewModel(application
             return
         }
         repository.sendCommand("STATUS")
+    }
+
+    fun clearLogs() {
+        _logs.value = emptyList()
     }
 }

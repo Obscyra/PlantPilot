@@ -1,6 +1,6 @@
 # Changelog
 
-## [3.0] - 2026-08-05
+## [3.0] - 2026-08-06
 
 ### Fixed
 - Firmware active-low relay startup: Fixed initialization sequence in `initRelays()` so output pins default to `RELAY_OFF` (`HIGH`) on boot without clicking/activating pumps.
@@ -10,6 +10,7 @@
 - WebSocket message parsing: Added support for `type == "status"` frames in `HardwareRepository` so `"STATUS"` replies update live pump states.
 - Service coroutine leak: Managed single `reconnectJob` reference in `SyncService` and added `cancelChildren()` cleanup in `onDestroy()`.
 - Data synchronization: Added `stop_on_disconnect` to `MotorConfig` payload and updated ESP32 firmware sync parser to preserve existing NVS values when keys are omitted.
+- Watering Animation Overlay: Dynamic timeout calculation based on plant water volume & flow rate, automatic completion on pump state OFF (`pumpStates`), `"STATUS"` probe on WS connect, and post-watering status sync to eliminate stuck overlay animations during network drops.
 
 ## [2.0] - 2026-08-04
 

@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.plantpilot.ui.theme.*
 import com.plantpilot.viewmodel.PumpTestViewModel
+import kotlinx.serialization.json.*
 
 @Composable
 fun DiagnosticsStatusSection(viewModel: PumpTestViewModel) {
@@ -98,55 +99,170 @@ fun StatusItem(
 
 @Composable
 fun LogLine(log: String) {
-    val prefix: String
-    val message: String
+    val timestampRegex = Regex("""^\[(\d{2}:\d{2}:\d{2})\]\s*(.*)$""")
+    val match = timestampRegex.find(log)
+    val timestamp = match?.groupValues?.get(1)
+    val rawContent = match?.groupValues?.get(2) ?: log
+
+    val badge: String
+    val friendlyMessage: String
     val color: Color
 
     when {
-        log.startsWith("Error") -> {
-            prefix = "ERR"
-            message = log.removePrefix("Error: ").removePrefix("Error")
+        rawContent.startsWith("Error") || rawContent.startsWith("Warn") -> {
+            badge = "ERR"
+            friendlyMessage = rawContent.removePrefix("Error: ").removePrefix("Warn: ")
             color = LogError
         }
-        log.startsWith("ESP32") -> {
-            prefix = "RX"
-            message = log.removePrefix("ESP32: ").removePrefix("ESP32")
-            color = LogSuccess
+        rawContent.startsWith("ESP32:") -> {
+            val text = rawContent.removePrefix("ESP32:").trim()
+            if (text.startsWith("{")) {
+                val parsed = parseJsonLog(text)
+                badge = parsed.first
+                friendlyMessage = parsed.second
+                color = parsed.third
+            } else if (text.startsWith("OK:")) {
+                badge = "ACK"
+                friendlyMessage = formatPumpAck(text)
+                color = LogSuccess
+            } else {
+                badge = "RX"
+                friendlyMessage = text
+                color = LogSuccess
+            }
         }
-        log.startsWith("App") -> {
-            prefix = "TX"
-            message = log.removePrefix("App: Sent ").removePrefix("App")
+        rawContent.startsWith("App:") -> {
+            badge = "TX"
+            val text = rawContent.removePrefix("App: Sent ").removePrefix("App: ").trim()
+            friendlyMessage = formatAppCommand(text)
             color = LogInfo
         }
-        log.startsWith("System") -> {
-            prefix = "SYS"
-            message = log.removePrefix("System: ").removePrefix("System")
+        rawContent.startsWith("System:") -> {
+            badge = "SYS"
+            friendlyMessage = rawContent.removePrefix("System:").trim()
             color = LogMuted
         }
         else -> {
-            prefix = ">>>"
-            message = log
+            badge = "LOG"
+            friendlyMessage = rawContent
             color = TerminalText
         }
     }
 
-    Row(modifier = Modifier.padding(vertical = 2.dp)) {
+    Row(
+        modifier = Modifier.padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (!timestamp.isNullOrEmpty()) {
+            Text(
+                text = timestamp,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+        }
+
+        Surface(
+            shape = MaterialTheme.shapes.extraSmall,
+            color = color.copy(alpha = 0.15f),
+            modifier = Modifier.padding(end = 6.dp)
+        ) {
+            Text(
+                text = badge,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                ),
+                color = color
+            )
+        }
+
         Text(
-            text = "[$prefix]",
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold
-            ),
-            color = color.copy(alpha = 0.6f)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = message,
+            text = friendlyMessage,
             style = MaterialTheme.typography.labelSmall.copy(
                 fontFamily = FontFamily.Monospace
             ),
             color = color
         )
+    }
+}
+
+private fun parseJsonLog(jsonStr: String): Triple<String, String, Color> {
+    return try {
+        val root = Json.parseToJsonElement(jsonStr).jsonObject
+        val type = root["type"]?.jsonPrimitive?.content ?: ""
+        when (type) {
+            "telemetry" -> {
+                val soilArr = root["soil"]?.jsonArray?.map { it.jsonPrimitive.content }
+                val rssi = root["wifi_rssi"]?.jsonPrimitive?.content
+                val heap = root["free_heap"]?.jsonPrimitive?.content?.toIntOrNull()
+                val soilStr = if (soilArr != null) "Soil Moisture: [${soilArr.joinToString("%")}%]" else "Telemetry Stream"
+                val rssiStr = if (rssi != null) " • RSSI: ${rssi} dBm" else ""
+                val heapStr = if (heap != null) " • Heap: ${heap / 1024} KB" else ""
+                Triple("DATA", "$soilStr$rssiStr$heapStr", LogSuccess)
+            }
+            "ok" -> {
+                val cmd = root["cmd"]?.jsonPrimitive?.content ?: ""
+                Triple("ACK", "Acknowledged: ${formatAppCommand(cmd)}", LogSuccess)
+            }
+            "status" -> {
+                val cadence = root["sensor_cadence_sec"]?.jsonPrimitive?.content
+                Triple("STATUS", "Hardware Status Received (Cadence: ${cadence ?: "12"}s)", LogInfo)
+            }
+            "watering_finished" -> {
+                val motor = root["motor"]?.jsonPrimitive?.content
+                val amount = root["amount_ml"]?.jsonPrimitive?.content
+                Triple("EVENT", "Watering Finished: Pump $motor ($amount ml)", LogSuccess)
+            }
+            else -> Triple("RX", jsonStr, LogSuccess)
+        }
+    } catch (_: Exception) {
+        Triple("RX", jsonStr, LogSuccess)
+    }
+}
+
+private fun mapPumpName(raw: String): String {
+    return when (raw.trim().uppercase(java.util.Locale.ROOT)) {
+        "A", "1" -> "1"
+        "B", "2" -> "2"
+        "C", "3" -> "3"
+        "D", "4" -> "4"
+        else -> raw
+    }
+}
+
+private fun formatPumpAck(text: String): String {
+    return when {
+        text.contains("PUMP_ALL_OFF") -> "All pumps stopped"
+        text.contains("PUMP") -> {
+            val part = text.removePrefix("OK: ").removePrefix("PUMP")
+            val parts = part.split("_")
+            val pumpNum = mapPumpName(parts.getOrNull(0) ?: "")
+            val action = parts.getOrNull(1) ?: ""
+            if (action.isNotBlank()) "Pump $pumpNum $action confirmed" else "Pump $pumpNum confirmed"
+        }
+        else -> text
+    }
+}
+
+private fun formatAppCommand(cmd: String): String {
+    return when {
+        cmd == "PUMP_ALL_OFF" -> "Stop All Pumps"
+        cmd.startsWith("PUMP") -> {
+            val parts = cmd.split("_")
+            val rawPump = parts.getOrNull(0)?.removePrefix("PUMP") ?: ""
+            val pumpNum = mapPumpName(rawPump)
+            val action = parts.getOrNull(1) ?: ""
+            "Turn Pump $pumpNum $action"
+        }
+        cmd == "STATUS" -> "Request Device Status"
+        cmd == "READ_SENSORS" -> "Read All Soil Sensors"
+        cmd == "RESET_CONFIG" -> "Factory Reset Device Config"
+        cmd.startsWith("SYNC_MODE") -> "Set Telemetry Rate to ${cmd.removePrefix("SYNC_MODE ").trim()}s"
+        else -> cmd
     }
 }
 

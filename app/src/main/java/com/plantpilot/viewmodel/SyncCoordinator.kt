@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.plantpilot.data.PlantPilotRepository
+import com.plantpilot.data.SettingsManager
 import com.plantpilot.model.AppSettings
 import com.plantpilot.model.DayOfWeek
 import com.plantpilot.model.Plant
@@ -35,6 +36,7 @@ class SyncCoordinator(
     private val settings: StateFlow<AppSettings>,
     private val scope: CoroutineScope,
     private val repository: PlantPilotRepository,
+    private val settingsManager: SettingsManager,
     private val historyManager: HistoryManager,
     private val canSendCommands: () -> Boolean,
     private val getWaterLevelPct: () -> Int?,
@@ -118,7 +120,15 @@ class SyncCoordinator(
     suspend fun performTwoWaySync() {
         val result: Result<DeviceConfigResponse> = repository.fetchDeviceConfig()
         if (result.isSuccess) {
-            val deviceMotors = result.getOrThrow().motors
+            val configResp = result.getOrThrow()
+            configResp.sensor_cadence_sec?.let { cadence ->
+                if (cadence != settings.value.sensorCadenceSec) {
+                    scope.launch {
+                        settingsManager.saveAppSettings(settings.value.copy(sensorCadenceSec = cadence))
+                    }
+                }
+            }
+            val deviceMotors = configResp.motors
             // Keep the calibration UI in sync with what the device stores.
             val calibration = deviceMotors.mapNotNull { dev ->
                 val dry = dev.calibration_dry
@@ -173,6 +183,13 @@ class SyncCoordinator(
                         mlPerSec = dev.ml_per_sec ?: it.mlPerSec
                     )
                 } else it
+            }
+        }
+        dev.max_runtime_minutes?.let { maxRun ->
+            if (maxRun != settings.value.maxRuntimeMinutes) {
+                scope.launch {
+                    settingsManager.saveAppSettings(settings.value.copy(maxRuntimeMinutes = maxRun))
+                }
             }
         }
         return true

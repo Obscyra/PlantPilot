@@ -65,10 +65,22 @@ class TelemetryProcessor(
             }
         }
 
-        // Update plants with real moisture data from push
+        // Update plants with high-precision App-side moisture calculation from raw ADC
         plantsFlow.update { currentList ->
             currentList.map { plant ->
-                val moisture = status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
+                val rawAdc = status.raw_soil?.getOrNull(plant.motorNumber - 1)
+                val moisture = if (rawAdc != null && plant.dryCalibration > 0 && plant.wetCalibration > 0) {
+                    val dry = plant.dryCalibration
+                    val wet = plant.wetCalibration
+                    val range = (wet - dry).toFloat()
+                    if (range != 0f) {
+                        ((rawAdc - dry) / range * 100f).toInt().coerceIn(0, 100)
+                    } else {
+                        status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
+                    }
+                } else {
+                    status.soil.getOrNull(plant.motorNumber - 1) ?: plant.currentMoisture
+                }
                 plant.copy(currentMoisture = moisture)
             }
         }

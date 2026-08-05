@@ -90,14 +90,14 @@ fun CalibrationScreen(
         if (raw != null) {
             val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
             val row = raw.mapIndexed { index, value ->
-                "S${index + 1}:${if (value >= 0) value.toString() else "----"}"
-            }.joinToString("  ")
-            terminalLines.add("$time  $row")
-            while (terminalLines.size > TERMINAL_MAX_LINES) terminalLines.removeAt(0)
+                "S${index + 1}: ${if (value >= 0) value.toString().padStart(4, ' ') else "----"}"
+            }.joinToString("  |  ")
+            terminalLines.add(0, "[$time] [ADC]  $row")
+            while (terminalLines.size > TERMINAL_MAX_LINES) terminalLines.removeAt(terminalLines.size - 1)
         }
     }
     LaunchedEffect(terminalLines.size) {
-        terminalScroll.animateScrollTo(Int.MAX_VALUE)
+        terminalScroll.animateScrollTo(0)
     }
 
     var selectedSensor by remember { mutableIntStateOf(1) }
@@ -202,13 +202,13 @@ fun CalibrationScreen(
         ) {
             // Status header
             Row(verticalAlignment = Alignment.CenterVertically) {
-                PulsingDot(isVisible = canDisplayLastKnownData)
+                PulsingDot(isVisible = canSendCommands)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (canDisplayLastKnownData) "Live Reading" else "Device Offline",
+                    text = if (canSendCommands) "Live Reading" else "Device Offline",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (canDisplayLastKnownData) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    color = if (canSendCommands) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
@@ -233,20 +233,14 @@ fun CalibrationScreen(
             ) {
                 if (terminalLines.isEmpty()) {
                     Text(
-                        text = if (canDisplayLastKnownData) "Waiting for telemetry..." else "Device offline",
+                        text = if (canSendCommands) "Waiting for telemetry..." else "Device offline",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         color = TerminalPlaceholder
                     )
                 } else {
                     terminalLines.forEach { line ->
-                        Text(
-                            text = line,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            lineHeight = 18.sp,
-                            color = TerminalGreen
-                        )
+                        com.plantpilot.ui.components.LogLine(line)
                     }
                 }
             }

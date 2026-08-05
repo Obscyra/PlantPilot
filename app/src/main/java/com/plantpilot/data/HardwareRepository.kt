@@ -58,18 +58,16 @@ class HardwareRepository : HardwareConnection {
         // in flight rather than flashing "Reconnecting" mid-watering.
         private const val WATERING_DEBOUNCE_MS = 30000L
 
-        // Exponential backoff: base 2s, multiplier 1.7x, cap 30s, ±20% jitter.
+        // Exponential backoff: base 2s, multiplier 1.3x, cap 5s, ±15% jitter to prevent thread exhaustion crashes
         private const val BACKOFF_BASE_MS = 2000L
-        private const val BACKOFF_MULTIPLIER = 1.7
-        private const val BACKOFF_MAX_MS = 30000L
-        private const val BACKOFF_JITTER = 0.2
-        // After this many consecutive failures, stop auto-retrying and show "Offline".
-        private const val MAX_RETRY_ATTEMPTS = 5
+        private const val BACKOFF_MULTIPLIER = 1.3
+        private const val BACKOFF_MAX_MS = 5000L
+        private const val BACKOFF_JITTER = 0.15
     }
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
-        .connectTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .pingInterval(15, TimeUnit.SECONDS) // Protocol-level keepalive
         .build()
 
@@ -105,6 +103,7 @@ class HardwareRepository : HardwareConnection {
     private var consecutiveFailures = 0
     private var wateringInProgress = false
     private var isBackgrounded = false
+    private var hasConnectedOnce = false
 
     // Tracks when we last sent a pump command to prevent server "ok" messages
     // (which contain the state of all pumps) from clobbering a newer local
@@ -161,11 +160,12 @@ class HardwareRepository : HardwareConnection {
 
     override fun connect(url: String) {
         val cleanUrl = sanitizeWsUrl(url)
-        if (cleanUrl == currentUrl && _connectionState.value == ConnectionState.Connected) return
-        if (_connectionState.value == ConnectionState.Connecting) return
+        // Avoid tearing down an active socket connection to the same URL
+        if (cleanUrl == currentUrl && isConnected()) return
         currentUrl = cleanUrl
         userInitiatedDisconnect = false
         consecutiveFailures = 0
+        hasConnectedOnce = false
         cancelReconnect()
         disconnectDebounceJob?.cancel()
         disconnectDebounceJob = null
@@ -179,17 +179,23 @@ class HardwareRepository : HardwareConnection {
 
     private fun openSocket() {
         val url = currentUrl ?: return
-        if (_connectionState.value != ConnectionState.Connecting) {
+        try {
+            webSocket?.cancel()
+            webSocket = null
+        } catch (_: Exception) {}
+        if (!hasConnectedOnce) {
+            _connectionState.value = ConnectionState.Connecting
+        } else if (_connectionState.value != ConnectionState.Connected) {
             _connectionState.value = ConnectionState.Reconnecting
         }
         val request = Request.Builder().url(url).build()
+        var currentSocket: WebSocket? = null
         val socket = client.newWebSocket(request, object : WebSocketListener() {
-            // Ignore callbacks from stale sockets (e.g. after reconnect), so the
-            // old socket's close events don't wipe state set by the new connection.
-            private fun isCurrent(ws: WebSocket): Boolean = ws === webSocket
+            private fun isCurrent(ws: WebSocket): Boolean = currentSocket == null || ws === currentSocket
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (!isCurrent(webSocket)) return
+                hasConnectedOnce = true
                 disconnectDebounceJob?.cancel()
                 disconnectDebounceJob = null
                 consecutiveFailures = 0
@@ -202,6 +208,7 @@ class HardwareRepository : HardwareConnection {
                 if (requestedCadenceSec > 0) {
                     sendCommand("SYNC_MODE $requestedCadenceSec")
                 }
+                sendCommand("STATUS")
                 startHeartbeat()
             }
 
@@ -233,6 +240,7 @@ class HardwareRepository : HardwareConnection {
                 onConnectionLost("Error: ${t.message}")
             }
         })
+        currentSocket = socket
         webSocket = socket
     }
 
@@ -240,35 +248,13 @@ class HardwareRepository : HardwareConnection {
         addLog(message)
         if (userInitiatedDisconnect) return
 
-        // 1. Immediately transition physical state to Reconnecting.
-        // Also flip from Connecting -> Reconnecting after the first failure so 
-        // the ViewModel's periodic poll can start checking HTTP connectivity.
-        if (_connectionState.value == ConnectionState.Connected || _connectionState.value == ConnectionState.Connecting) {
-            _connectionState.value = ConnectionState.Reconnecting
-        }
-
+        webSocket = null
         consecutiveFailures++
+        _connectionState.value = ConnectionState.Failed
 
-        // 2. Decide: Retry or Fail? 
-        // If we've reached the limit, stop the automatic socket loop and rely on
-        // the ViewModel poll or user "Retry" to recover.
-        if (consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
-            _connectionState.value = ConnectionState.Failed
-            addLog("System: Connection failed after $MAX_RETRY_ATTEMPTS attempts.")
-            
-            // Clear data immediately on hard failure
-            _telemetry.value = null
-            resetPumpStates()
-            stopHeartbeat()
-            disconnectDebounceJob?.cancel()
-            disconnectDebounceJob = null
-            return
-        }
-
-        // 3. Start/Update the Reconnection Loop
         scheduleReconnect()
 
-        // 4. UI/Data Grace Period: Only clear telemetry and stop heartbeat in 
+        // UI/Data Grace Period: Only clear telemetry and stop heartbeat in 
         // the UI if the link stays dead for a while (prevents flickering).
         if (disconnectDebounceJob?.isActive != true) {
             disconnectDebounceJob = scope.launch {
@@ -455,15 +441,16 @@ class HardwareRepository : HardwareConnection {
 
     override fun pauseTelemetry() {
         if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
-            sendCommand("TELEMETRY_PAUSE")
-            addLog("App: Telemetry paused (backgrounded)")
+            setStreamCadence(30)
+            addLog("App: Telemetry switched to background cadence (30s)")
         }
     }
 
     override fun resumeTelemetry() {
         if (webSocket != null && _connectionState.value == ConnectionState.Connected) {
-            sendCommand("TELEMETRY_RESUME")
-            addLog("App: Telemetry resumed (foregrounded)")
+            val cadence = if (requestedCadenceSec > 0) requestedCadenceSec else 12
+            setStreamCadence(cadence)
+            addLog("App: Telemetry restored to foreground cadence (${cadence}s)")
         }
     }
 
@@ -483,8 +470,11 @@ class HardwareRepository : HardwareConnection {
         addLog(message)
     }
 
+    private val timeFormatter = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+
     private fun addLog(message: String) {
-        _logs.tryEmit(message)
+        val timestamp = timeFormatter.format(java.util.Date())
+        _logs.tryEmit("[$timestamp] $message")
     }
 
     private fun resetPumpStates() {
@@ -528,8 +518,8 @@ class HardwareRepository : HardwareConnection {
                             val pumpId = index + 1
                             if (pumpId in 1..4) {
                                 val lastSent = lastPumpCommandTime[pumpId] ?: 0L
-                                // Firmware confirms current state.
-                                if (now - lastSent > 1200L) { // 1.2s grace period
+                                // Extend grace period to 5.0s so optimistic UI is not overwritten by stale server states
+                                if (now - lastSent > 5000L) {
                                     newStates[pumpId] = elem.jsonPrimitive.boolean
                                 }
                             }

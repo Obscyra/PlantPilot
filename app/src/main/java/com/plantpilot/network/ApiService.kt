@@ -17,6 +17,7 @@ data class DeviceStatusResponse(
     val epoch: Long? = null,
     val pumps: List<Boolean>? = null,
     val queued: List<Boolean>? = null,
+    val sensor_cadence_sec: Int? = null,
     val motors: List<DeviceMotorConfig>? = null
 )
 
@@ -101,6 +102,7 @@ data class DeviceMotorConfig(
 
 @Serializable
 data class DeviceConfigResponse(
+    val sensor_cadence_sec: Int? = null,
     val motors: List<DeviceMotorConfig> = emptyList()
 )
 

@@ -41,27 +41,19 @@ object ConnectionStateHelper {
         var revealJob: Job? = null
         scope.launch {
             real.collect { state ->
-                when (state) {
-                    ConnectionState.Connecting -> {
-                        revealJob?.cancel()
+                revealJob?.cancel()
+                if (state == ConnectionState.Connected) {
+                    if (display.value == ConnectionState.Failed || display.value == ConnectionState.Disconnected) {
                         revealJob = scope.launch {
-                            delay(400) // Debounce initial connection attempt
-                            display.value = ConnectionState.Connecting
-                        }
-                    }
-                    ConnectionState.Reconnecting -> {
-                        revealJob?.cancel()
-                        revealJob = scope.launch {
-                            val debounceMs = if (wateringInProgress?.value == true) 15000L else 600L
-                            delay(debounceMs) // Debounce reconnection attempts
                             display.value = ConnectionState.Reconnecting
+                            delay(1500L) // Visual pulse: show Reconnecting... for 1.5s before Connected
+                            display.value = ConnectionState.Connected
                         }
+                    } else {
+                        display.value = ConnectionState.Connected
                     }
-                    else -> {
-                        revealJob?.cancel()
-                        revealJob = null
-                        display.value = state
-                    }
+                } else {
+                    display.value = state
                 }
             }
         }

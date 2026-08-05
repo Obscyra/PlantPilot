@@ -91,13 +91,15 @@ fun HardwareSettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    var editableMaxRuntime by remember(settings.maxRuntimeMinutes) { mutableFloatStateOf(settings.maxRuntimeMinutes.toFloat()) }
+                    var editableMaxRuntime by remember(settings.maxRuntimeMinutes) {
+                        mutableFloatStateOf(settings.maxRuntimeMinutes.toFloat().coerceIn(0f, 3f))
+                    }
                     Slider(
                         value = editableMaxRuntime,
                         onValueChange = { editableMaxRuntime = it },
                         onValueChangeFinished = { viewModel.updateGlobalMaxRuntime(editableMaxRuntime.toInt()) },
-                        valueRange = 0f..10f,
-                        steps = 9,
+                        valueRange = 0f..3f,
+                        steps = 2,
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(
@@ -105,7 +107,7 @@ fun HardwareSettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("Off", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("10 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("3 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -190,12 +192,17 @@ fun HardwareSettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    var editableCadence by remember(settings.sensorCadenceSec) { mutableFloatStateOf(settings.sensorCadenceSec.toFloat()) }
+                    var editableCadence by remember(settings.sensorCadenceSec) {
+                        mutableFloatStateOf(settings.sensorCadenceSec.toFloat().coerceIn(3f, 30f))
+                    }
                     Slider(
                         value = editableCadence,
-                        onValueChange = { editableCadence = it },
+                        onValueChange = { newValue ->
+                            val snapped = (kotlin.math.round(newValue / 3f) * 3f).coerceIn(3f, 30f)
+                            editableCadence = snapped
+                        },
                         onValueChangeFinished = { viewModel.updateSensorCadence(editableCadence.toInt()) },
-                        valueRange = 1f..10f,
+                        valueRange = 3f..30f,
                         steps = 8,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -203,8 +210,60 @@ fun HardwareSettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("1s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("10s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("3s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("30s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            val deviceState by viewModel.deviceState.collectAsState()
+
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Low Water Level Alert",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Trigger low water notification when tank drops to this level (level 1 or 2)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Level ${deviceState.lowWaterThreshold.coerceIn(1, 2)}",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    var editableThreshold by remember(deviceState.lowWaterThreshold) {
+                        mutableFloatStateOf(deviceState.lowWaterThreshold.toFloat().coerceIn(1f, 2f))
+                    }
+                    Slider(
+                        value = editableThreshold,
+                        onValueChange = { editableThreshold = it },
+                        onValueChangeFinished = {
+                            viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = editableThreshold.toInt()) }
+                        },
+                        valueRange = 1f..2f,
+                        steps = 0,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Level 1 (Default)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Level 2", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }

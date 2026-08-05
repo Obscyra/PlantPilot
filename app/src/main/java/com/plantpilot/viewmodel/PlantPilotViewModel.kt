@@ -118,8 +118,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
 
     private var wasPreviouslyConnected: Boolean = false
 
-    // Watering completion tracking: motorNumber -> Deferred that completes on watering_finished event
-    private val pendingWatering = ConcurrentHashMap<Int, CompletableDeferred<Boolean>>()
+
 
     private val historyManager: HistoryManager = HistoryManager(
         historyFlow = _history,
@@ -127,7 +126,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         scope = viewModelScope,
         settingsManager = settingsManager,
         notificationHelper = notificationHelper,
-        onWateringFinished = { motor -> pendingWatering.remove(motor)?.complete(true) },
+        onWateringFinished = { _ -> },
         onWaterUsed = { ml ->
             _deviceState.update { current ->
                 current.copy(
@@ -145,6 +144,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         settings = _settings,
         scope = viewModelScope,
         repository = repository,
+        settingsManager = settingsManager,
         historyManager = historyManager,
         canSendCommands = { canSendCommands },
         getWaterLevelPct = {
@@ -191,6 +191,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 telemetry?.let { telemetryProcessor.applyTelemetry(it) }
             }
         }
+
+
 
         // Observe connection state (live, no debounce — UI derives directly from connectionState)
         viewModelScope.launch {
@@ -344,24 +346,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     /** Called from MainActivity ON_RESUME so the app re-checks when foregrounded. */
     fun onAppResumed() {
         viewModelScope.launch {
-            val state = connectionState.value
-            // 1. Force an immediate reconnect attempt if not already handshake-in-progress.
-            if (state != ConnectionState.Connected && state != ConnectionState.Connecting) {
+            if (!hardwareRepository.isConnected()) {
                 connectToDevice()
-                // Brief pause to let the TCP/WS task start before firing HTTP probes
-                delay(150)
-            }
-            
-            // 2. HTTP connectivity check (lightweight handshake)
-            val ok = liveCheck()
-            if (ok) {
-                if (canDisplayLastKnownData) {
-                    syncCoordinator.performTwoWaySync()
-                    requestSensorReading()
-                } else {
-                    // If HTTP works but WebSocket is still offline, nudge it again.
-                    connectToDevice()
-                }
+            } else {
+                hardwareRepository.setStreamCadence(settings.value.sensorCadenceSec)
+                hardwareRepository.resumeTelemetry()
             }
         }
     }
@@ -422,36 +411,28 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         }
         val plant = _plants.value.find { it.id == plantId } ?: return false
 
+        // Start watering animation IMMEDIATELY on click for instantaneous UI response
         _isWateringPlantId.value = plantId
         notificationHelper.showWateringStarted(plant.name)
-
-        // Create deferred BEFORE the HTTP request
-        val deferred = CompletableDeferred<Boolean>()
-        pendingWatering[plant.motorNumber] = deferred
-
         hardwareRepository.setWateringInProgress(true)
 
-        return try {
-            val result = repository.waterNow(plant.motorNumber, plant.mlPerSec, plant.waterAmountMl)
-            if (result.isSuccess) {
-                try {
-                    withTimeoutOrNull(60_000L) {
-                        deferred.await()
-                    } ?: false
-                } finally {
-                    pendingWatering.remove(plant.motorNumber)
-                }
-            } else {
-                pendingWatering.remove(plant.motorNumber)
-                false
+        // Launch HTTP request asynchronously in background without blocking animation
+        viewModelScope.launch {
+            try {
+                repository.waterNow(plant.motorNumber, plant.mlPerSec, plant.waterAmountMl)
+            } catch (_: Exception) {
             }
-        } catch (e: Exception) {
-            pendingWatering.remove(plant.motorNumber)
-            false
+        }
+
+        // Keep animation active for exactly 3 seconds
+        try {
+            delay(3000L)
         } finally {
             hardwareRepository.setWateringInProgress(false)
             _isWateringPlantId.value = null
+            notificationHelper.showWateringFinished(plant.name)
         }
+        return true
     }
 
     fun syncConfigWithDevice(silent: Boolean = false, force: Boolean = false) {

@@ -1,8 +1,48 @@
-/**
- * PlantPilot — Production Hardware Firmware
+/*
+ * =====================================================================================
+ *  PlantPilot — ESP32 Firmware
+ *  Component: Core Hardware Controller (4-Channel Smart Irrigation & Telemetry Engine)
  *
- * Lightweight SoftAP Setup (No BLE).
- * Hardware: 4-Channel Relay (Active Low) on GPIO 25, 26, 27, 14.
+ *  Architecture:
+ *  - Network: Dual Wi-Fi STA / SoftAP Setup Mode (Captive Portal), AsyncWebSocket, REST API
+ *  - Hardware: 4 Active-Low Relays (GPIO 25, 26, 27, 14), 4 Capacitive Soil Sensors (GPIO 34, 35, 32, 33)
+ *  - Safety: Single-Motor Power Lock, Staggered Motor Activation (250ms), Max Runtime Failsafe
+ *  - Power Management: Wi-Fi Modem Sleep (WIFI_PS_MIN_MODEM), FreeRTOS Task Yield (delay 1ms)
+ *  - Flash Wear Protection: NVS writes use memcmp content comparisons
+ * =====================================================================================
+/*
+ * =====================================================================================
+ *  REQUIRED ARDUINO LIBRARIES & DEPENDENCIES:
+ *  -----------------------------------------------------------------------------------
+ *  1. <WiFi.h> (Built-in ESP32 Board Package)
+ *     - Manages Wi-Fi Station (STA) connection & SoftAP Setup Access Point.
+ *     - Configures modem sleep (WIFI_PS_MIN_MODEM) to prevent thermal overheating.
+ *
+ *  2. <ESPAsyncWebServer.h> (by me-no-dev / mathieucarbou - Install via Library Manager)
+ *     - Asynchronous non-blocking HTTP server for REST API (/api/status, /api/config).
+ *     - Hosts AsyncWebSocket server (ws://plantpilot.local/ws) for real-time telemetry.
+ *
+ *  3. <AsyncTCP.h> (by me-no-dev / mathieucarbou - Install via Library Manager)
+ *     - Low-level asynchronous TCP framework underlying ESPAsyncWebServer on FreeRTOS.
+ *
+ *  4. <ArduinoJson.h> (v6.x / v7.x by Benoit Blanchon - Install via Library Manager)
+ *     - Dynamic JSON payload builder & parser for WebSocket streaming & REST API.
+ *
+ *  5. <Preferences.h> (Built-in ESP32 Board Package)
+ *     - Manages non-volatile flash storage (NVS) for motor configs & Wi-Fi credentials.
+ *
+ *  6. <time.h> (Built-in ESP32 C Standard Library)
+ *     - Handles POSIX time routines, NTP time synchronization, and timezone conversion.
+ *
+ *  7. <ESPmDNS.h> (Built-in ESP32 Board Package)
+ *     - Multicast DNS service responder enabling connection via "http://plantpilot.local/".
+ *
+ *  8. <DNSServer.h> (Built-in ESP32 Board Package)
+ *     - Captive portal DNS server forwarding setup traffic to 192.168.4.1 in SoftAP mode.
+ *
+ *  9. "esp_adc_cal.h" (Built-in ESP-IDF Framework)
+ *     - 12-bit ADC voltage calibration using internal eFuse Vref for soil sensors.
+ * =====================================================================================
  */
 
 #include <WiFi.h>
@@ -15,100 +55,116 @@
 #include <DNSServer.h>
 #include "esp_adc_cal.h"
 
-// --- CONFIGURATION ---
-const char* HOSTNAME = "plantpilot";
-const char* SETUP_SSID = "PlantPilot-Setup";
-const int DEFAULT_ML_PER_SECOND = 10; // Fallback if per-pump value is 0
-const int MAX_ML_PER_SECOND = 100;    // Sanity cap
-const int MAX_WATERING_ML = 10000;    // Max ml per watering cycle
+// =====================================================================================
+//  SECTION 1: SYSTEM CONFIGURATION & PIN MAPPINGS
+// =====================================================================================
+const char* HOSTNAME = "plantpilot";          // mDNS hostname -> http://plantpilot.local/
+const char* SETUP_SSID = "PlantPilot_Setup";  // Open SoftAP network name for initial Wi-Fi setup
+const int DEFAULT_ML_PER_SECOND = 10;         // Default pump flow rate fallback (ml/s)
+const int MAX_ML_PER_SECOND = 100;            // Maximum flow rate sanity cap (ml/s)
+const int MAX_WATERING_ML = 10000;            // Maximum safety cap per single watering run (ml)
 
-// --- ONBOARD LED STATUS ---
-// WROOM-32 dev kits expose a built-in blue LED on GPIO 2.
-// 1. Uniform Fast Blink (200ms) = WiFi not connected / searching
-// 2. Double-Heartbeat Pulse     = Setup (SoftAP) Mode
-// 3. Short Blip (every 2s)      = WiFi connected, but App disconnected (Idle)
-// 4. Solid ON                   = WiFi connected AND App connected (Active)
+// Status LED (GPIO 2 - Onboard Blue LED on ESP32 DevKit)
+// - Fast Blink (200ms): Searching for Wi-Fi AP
+// - Double-Heartbeat: SoftAP Setup Mode active
+// - Short Blip (every 2s): Wi-Fi connected, App disconnected (Idle)
+// - Solid ON: Wi-Fi connected AND WebSocket App client active
 #define STATUS_LED GPIO_NUM_2
 
-// NTP & Time
+// Onboard User Button (BOOT Pin - GPIO 0)
+// - Single Short Press (<5s): Software reboot ESP32
+// - Long Press (>=5s): Blinks LED 6x, clears NVS Wi-Fi credentials, reboots to Setup AP
+#define BUTTON_PIN GPIO_NUM_0
+bool buttonPressed = false;
+bool buttonLongPressHandled = false;
+unsigned long buttonPressStartMs = 0;
+
+// NTP Network Time Synchronization Constants
 const char* NTP_SERVER = "pool.ntp.org";
-const long  GMT_OFFSET_SEC = 21600; // UTC+6
+const long  GMT_OFFSET_SEC = 21600; // UTC+6 timezone offset (seconds)
 const int   DST_OFFSET_SEC = 0;
 
-// Time Persistence
+// Persisted Time Structure (survives soft reboots)
 struct TimeSyncData {
     unsigned long epoch;
     unsigned long syncMillis;
 };
 bool timeSet = false;
-unsigned long bootEpochOffset = 0; // epoch at current boot, computed once
+unsigned long bootEpochOffset = 0; // Calculated epoch offset at current boot
 
-// Cached WiFi SSID (avoids temp String allocation per telemetry frame)
+// Wi-Fi Connection & Radio Management State
 String cachedWifiSsid = "";
-
-// WiFi Resilience
 unsigned long lastWifiRetry = 0;
 uint8_t lastWiFiReason = 0;
 volatile bool wasConnected = false;
-bool didRadioReset = false; // Moved from loop() to allow reset on connection
+bool didRadioReset = false;
 unsigned long restartTime = 0;
 bool pendingRestart = false;
 bool setupModeActive = false;
 
-// --- DATA STRUCTURES ---
+// =====================================================================================
+//  SECTION 2: HARDWARE PINS & DATA STRUCTURES
+// =====================================================================================
+
+// Historical Watering Event Record (Ring buffer stored in RAM for sync catch-up)
 struct HistoryEntry {
-    int motor;
-    int amount;
-    char trigger[12];
-    unsigned long epoch;
-    int moistureAfter;
+    int motor;             // Motor number (1..4)
+    int amount;            // Target watering volume (ml)
+    char trigger[12];      // Trigger origin: "manual", "auto", or "scheduled"
+    unsigned long epoch;   // Epoch timestamp (seconds)
+    int moistureAfter;     // Soil moisture level (%) after watering completed
     bool isValid;
 };
 HistoryEntry wateringHistory[10];
 int historyWriteIdx = 0;
 
+// Watering Schedule Slot (up to 5 per motor channel)
 struct WateringSchedule {
-    int hour;
-    int minute;
+    int hour;    // 0..23
+    int minute;  // 0..59
 };
 
+// Motor Configuration Structure (persisted per-motor in ESP32 NVS)
 struct MotorSettings {
-    bool isEnabled;
-    bool autoMode;
-    int amountMl;
-    int moistureThreshold;
-    int calibrationDry;   // raw ADC value in open air (driest point)
-    int calibrationWet;   // raw ADC value submerged in water (wettest point)
-    int version;
-    unsigned long lastModified; // epoch seconds of last config change (two-way sync)
-    int minIntervalHours; // min hours between auto waterings (0 = no limit)
-    WateringSchedule schedules[5];
-    int scheduleCount;
-    unsigned long lastAutoWaterEpoch; // Last auto-watering completion (epoch)
-    int mlPerSecond;       // Per-pump flow rate (0 = use default)
-    int maxRuntimeMinutes; // Failsafe: max minutes pump can run (0 = no limit)
-    bool stopOnDisconnect; // Stop pump when WebSocket client disconnects
+    bool isEnabled;                    // True if motor channel is enabled
+    bool autoMode;                     // True if auto moisture watering is active
+    int amountMl;                      // Default watering volume per run (ml)
+    int moistureThreshold;             // Soil moisture threshold (%) to trigger auto-watering
+    int calibrationDry;                // Raw ADC value in open air (100% dry soil)
+    int calibrationWet;                // Raw ADC value submerged in water (100% wet soil)
+    int version;                       // Version counter for conflict resolution during sync
+    unsigned long lastModified;        // Epoch seconds of last modification
+    int minIntervalHours;              // Minimum cooldown hours between auto waterings
+    WateringSchedule schedules[5];     // Fixed array of up to 5 daily schedules
+    int scheduleCount;                 // Active schedule count
+    unsigned long lastAutoWaterEpoch;  // Last auto-watering completion epoch
+    int mlPerSecond;                   // Calibrated flow rate (ml/s)
+    int maxRuntimeMinutes;             // Failsafe: maximum allowed runtime before auto shutdown
+    bool stopOnDisconnect;             // True to cut pump power if WebSocket app disconnects
 };
 
+// Physical Relay Pin Mapping (Active Low Control)
 struct Relay {
-    int pin;
-    int sensorPin;
-    bool isOn;
-    unsigned long startTime;
-    unsigned long duration;
-    const char* name;
-    char lastTriggerSource[16];
-    int lastAmountMl;
+    int pin;                           // GPIO pin for relay control
+    int sensorPin;                     // Analog ADC pin for capacitive soil sensor
+    bool isOn;                         // Live operational state (true = relay ON)
+    unsigned long startTime;           // Millis timestamp when motor started
+    unsigned long duration;            // Target run duration (ms)
+    const char* name;                  // Display name
+    char lastTriggerSource[16];        // Origin trigger source
+    int lastAmountMl;                  // Target watering volume (ml)
 };
 
+// Relays are Active Low: LOW = Relay Closed (ON), HIGH = Relay Open (OFF)
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
 
+// Hardware Pin Definitions (4 Motors & 4 Soil Sensors)
 Relay pumps[4] = {
-    {25, 34, false, 0, 0, "Pump 1", "none", 0},
-    {26, 35, false, 0, 0, "Pump 2", "none", 0},
-    {27, 32, false, 0, 0, "Pump 3", "none", 0},
-    {14, 33, false, 0, 0, "Pump 4", "none", 0}
+    {25, 34, false, 0, 0, "Pump 1", "none", 0}, // Motor 1: Relay GPIO 25, Sensor GPIO 34
+    {26, 35, false, 0, 0, "Pump 2", "none", 0}, // Motor 2: Relay GPIO 26, Sensor GPIO 35
+    {27, 32, false, 0, 0, "Pump 3", "none", 0}, // Motor 3: Relay GPIO 27, Sensor GPIO 32
+    {14, 33, false, 0, 0, "Pump 4", "none", 0}  // Motor 4: Relay GPIO 14, Sensor GPIO 33
 };
 
 MotorSettings motorConfigs[4];
@@ -118,39 +174,32 @@ int waterLevel = 100;
 
 // ADC Calibration Characteristics
 esp_adc_cal_characteristics_t *adc_chars;
-// Epoch of the last completed timed watering per pump; used to enforce the
-// per-plant min auto-water interval. Reset to 0 on boot (no gating until the
-// first completion). Uses millis() for internal robustness against NTP issues.
 unsigned long lastAutoWaterTime[4] = {0, 0, 0, 0};
 
-// --- PER-CHANNEL ADAPTIVE POLLING ---
-// Each auto-mode channel has its own sensor-read schedule based on moisture
-// proximity to threshold.  Far from threshold = slow reads, near = fast reads.
+// =====================================================================================
+//  SECTION 3: ADAPTIVE POLLING & TIMING ENGINE
+// =====================================================================================
+// Adjusts sensor read intervals dynamically based on moisture proximity to threshold
+// (conserves sensor probe lifespan and prevents electrolysis degradation).
 struct ChannelPollState {
-    unsigned long nextReadDueMs;     // millis() deadline — loop() checks this
-    unsigned long currentIntervalMs; // adaptive interval (recomputed on events)
-    int lastMoisture;                // cached reading for delta calculations
-    bool active;                     // true when autoMode or schedules exist
+    unsigned long nextReadDueMs;     // Millis deadline for next read
+    unsigned long currentIntervalMs; // Current adaptive polling interval (ms)
+    int lastMoisture;                // Last cached moisture reading (%)
+    bool active;                     // True if autoMode or schedules are enabled
 };
 ChannelPollState channelPoll[4];
 
-// --- MOTOR BUSY LOCK ---
-// Only one motor may run at a time to prevent power-surge / brownout issues
-// when multiple pumps start simultaneously.  -1 = idle.
+// =====================================================================================
+//  SECTION 4: MOTOR SAFETY QUEUES & HARDWARE LOCKS
+// =====================================================================================
+// Single Motor Busy Lock: Only ONE motor runs at a time to prevent power brownouts
 int activeMotorIndex = -1;
 
-// Sensor read cadence. Raw ADC readings are only refreshed every 10 minutes
-// for the dashboard; opening the calibration sheet forces a 1s realtime stream.
-const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 min
+const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 minutes default sensor poll
 volatile bool calibrationStreamActive = false;
 volatile bool telemetryPaused = false;
-// Minimum delay (ms) before the first telemetry push after a new WebSocket
-// connection, preventing a flood of messages that can overflow the TCP buffer.
 volatile unsigned long firstTelemetryAfterConnectMs = 0;
 unsigned long lastSensorSent = 0;
-// Set by the WS command handler (AsyncTCP task) to ask loop() to run the heavy
-// broadcastTelemetry() on the main loop stack instead of the small async task
-// stack, preventing a stack overflow when a command triggers a full sensor read.
 volatile bool pendingSensorRead = false;
 
 // --- CLIENT HEARTBEAT TRACKING ---
@@ -229,16 +278,16 @@ void recomputeChannelInterval(int i) {
 
     unsigned long intervalMs;
     if (gap > 20) {
-        // Far above threshold — idle reading (12 min)
-        intervalMs = 720000UL;
+        // Far above threshold — idle reading (30 min) to conserve sensor & power
+        intervalMs = 1800000UL;
     } else if (gap > 5) {
-        // Approaching threshold — moderate cadence (5 min)
-        intervalMs = 300000UL;
+        // Approaching threshold — moderate cadence (10 min)
+        intervalMs = 600000UL;
     } else if (gap > 0) {
-        // Very close — watch closely (90 sec)
-        intervalMs = 90000UL;
+        // Very close — watch closely (3 min)
+        intervalMs = 180000UL;
     } else {
-        // Below threshold — read frequently but not obsessively (2 min)
+        // Below threshold — read frequently but safely (2 min)
         intervalMs = 120000UL;
     }
 
@@ -251,9 +300,9 @@ void recomputeChannelInterval(int i) {
         unsigned long elapsed = nowEpoch - motorConfigs[i].lastAutoWaterEpoch;
         unsigned long cooldown = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
         if (elapsed < cooldown) {
-            // Inside cooldown — relax to 15 min so we don't pollute ADC with
-            // pump-induced electrical noise and don't waste CPU.
-            intervalMs = 900000UL;
+            // Inside cooldown — relax to 30 min so we don't pollute ADC with
+            // pump-induced electrical noise and don't wear out sensor probes.
+            intervalMs = 1800000UL;
         }
     }
 
@@ -306,6 +355,7 @@ void releaseMotorLock() {
 // background -> 3s, no clients -> 60s. Reset to 3s on boot; the app re-sends
 // its mode whenever it (re)connects.
 volatile unsigned long streamCadenceMs = 3000UL;
+int savedCadenceSec = 3;
 
 // Last time the heavy per-motor config array was included in a telemetry frame
 // (signature of versions/timestamps). Reset to 0 on boot and whenever a WS
@@ -326,6 +376,13 @@ void printWiFiDiagnostics() {
 // --- TIME MANAGER ---
 
 void saveTimeSync(unsigned long epoch) {
+    // Avoid NVS flash wear if time offset is already set and drift is under 60 seconds
+    unsigned long currentCalculated = getNow();
+    if (currentCalculated > 0 && abs((long)epoch - (long)currentCalculated) < 60) {
+        bootEpochOffset = epoch - millis() / 1000;
+        timeSet = true;
+        return;
+    }
     TimeSyncData data = { epoch, millis() };
     preferences.begin("time", false);
     size_t written = preferences.putBytes("sync", &data, sizeof(data));
@@ -333,7 +390,7 @@ void saveTimeSync(unsigned long epoch) {
     if (written == 0) Serial.println("[TIME] WARNING: NVS write failed for time sync");
     bootEpochOffset = epoch - millis() / 1000;
     timeSet = true;
-    Serial.printf("[TIME] Saved Sync: %lu at %lu ms\n", epoch, data.syncMillis);
+    Serial.printf("[TIME] Saved Sync to NVS: %lu at %lu ms\n", epoch, data.syncMillis);
 }
 
 // In-RAM time calculation — no NVS access per call.
@@ -431,6 +488,7 @@ void broadcastTelemetry() {
     doc["uptime_sec"] = millis() / 1000;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["epoch"] = getNow();
+    doc["sensor_cadence_sec"] = savedCadenceSec;
 
     JsonArray pumpsState = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
@@ -506,8 +564,11 @@ void broadcastTelemetry() {
     }
 }
 
-// Writes into a static buffer (no String alloc); safe because callers use the
-// result immediately in Serial.printf before the next call.
+// =====================================================================================
+//  SECTION 5: TELEMETRY STREAMING & SERIAL LOGGING ENGINE
+// =====================================================================================
+
+// Writes local timestamp into static string buffer (no dynamic String heap allocation)
 const char* getLocalTimeStr() {
     static char buf[10];
     unsigned long nowEpoch = getNow();
@@ -519,6 +580,9 @@ const char* getLocalTimeStr() {
     return buf;
 }
 
+// =====================================================================================
+//  SECTION 6: TIME MANAGER & NTP NETWORK TIME SYNC
+// =====================================================================================
 void syncWithNtp() {
     if (WiFi.status() != WL_CONNECTED) return;
     configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
@@ -527,7 +591,7 @@ void syncWithNtp() {
         time_t now;
         time(&now);
         unsigned long epoch = (unsigned long)now;
-        // Only persist if time actually changed (reduces NVS writes)
+        // Only persist to NVS if time drift exceeds 2 seconds (flash wear protection)
         unsigned long prev = getNow();
         if (prev == 0 || (epoch > prev ? (epoch - prev) > 2 : (prev - epoch) > 2)) {
             saveTimeSync(epoch);
@@ -536,8 +600,9 @@ void syncWithNtp() {
     }
 }
 
-// --- HARDWARE ---
-
+// =====================================================================================
+//  SECTION 7: HARDWARE RELAYS, SENSORS & USER BUTTON HANDLER
+// =====================================================================================
 void initRelays() {
     Serial.println("[HARDWARE] Initializing Pins & ADC...");
 
@@ -563,6 +628,49 @@ void initRelays() {
 void initStatusLed() {
     pinMode(STATUS_LED, OUTPUT);
     digitalWrite(STATUS_LED, LOW);
+}
+
+void initButton() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+}
+
+// Polled button state handler (BOOT Pin / GPIO 0)
+// - Short press (<5s): Software reboot
+// - Long press (>=5s): Blinks LED 6x, clears NVS Wi-Fi credentials, reboots to Setup AP
+void updateButton() {
+    bool isDown = (digitalRead(BUTTON_PIN) == LOW);
+    unsigned long now = millis();
+
+    if (isDown) {
+        if (!buttonPressed) {
+            buttonPressed = true;
+            buttonLongPressHandled = false;
+            buttonPressStartMs = now;
+        } else if (!buttonLongPressHandled && (now - buttonPressStartMs >= 5000)) {
+            buttonLongPressHandled = true;
+            Serial.printf("[%s] [BUTTON] 5s long press detected -> Clearing WiFi credentials & entering Setup mode...\n", getLocalTimeStr());
+            for (int i = 0; i < 6; i++) {
+                digitalWrite(STATUS_LED, HIGH); delay(50);
+                digitalWrite(STATUS_LED, LOW); delay(50);
+            }
+            preferences.begin("wifi", false);
+            preferences.clear();
+            preferences.end();
+            WiFi.disconnect(true, true);
+            delay(500);
+            ESP.restart();
+        }
+    } else {
+        if (buttonPressed) {
+            unsigned long duration = now - buttonPressStartMs;
+            buttonPressed = false;
+            if (!buttonLongPressHandled && duration >= 50) { // Single short press
+                Serial.printf("[%s] [BUTTON] Single press detected (%lu ms) -> Restarting ESP32...\n", getLocalTimeStr(), duration);
+                delay(200);
+                ESP.restart();
+            }
+        }
+    }
 }
 
 // Non-blocking status LED pattern generator.
@@ -748,11 +856,29 @@ void updatePumps() {
     }
 }
 
-// --- PERSISTENCE ---
+// =====================================================================================
+//  SECTION 8: NVS FLASH PERSISTENCE MANAGER
+// =====================================================================================
+// Handles non-volatile flash storage for per-pump configurations, calibration, and cadence.
+// Uses memcmp content comparison to eliminate redundant flash erase/write cycles.
 
 void saveMotorConfig(int id) {
     char key[16];
     sprintf(key, "motor%d", id);
+
+    // Flash Wear Guard: Compare existing NVS data with new data; skip write if identical
+    MotorSettings existing;
+    memset(&existing, 0, sizeof(MotorSettings));
+    preferences.begin("plantpilot", true);
+    if (preferences.isKey(key)) {
+        preferences.getBytes(key, &existing, sizeof(MotorSettings));
+    }
+    preferences.end();
+
+    if (memcmp(&existing, &motorConfigs[id-1], sizeof(MotorSettings)) == 0) {
+        return; // Content is unchanged — skip NVS write to preserve flash health!
+    }
+
     preferences.begin("plantpilot", false);
     size_t written = preferences.putBytes(key, &motorConfigs[id-1], sizeof(MotorSettings));
     preferences.end();
@@ -771,6 +897,10 @@ void saveMotorConfig(int id) {
 
 void loadConfigs() {
     preferences.begin("plantpilot", true);
+    savedCadenceSec = preferences.getInt("cadence", 3);
+    if (savedCadenceSec < 1 || savedCadenceSec > 30) savedCadenceSec = 3;
+    streamCadenceMs = (unsigned long)savedCadenceSec * 1000UL;
+
     for (int i = 1; i <= 4; i++) {
         char key[16]; sprintf(key, "motor%d", i);
         memset(&motorConfigs[i-1], 0, sizeof(MotorSettings));
@@ -815,7 +945,11 @@ void loadConfigs() {
     }
 }
 
-// --- SCHEDULING ---
+// =====================================================================================
+//  SECTION 9: AUTO-WATERING & CALENDAR SCHEDULER
+// =====================================================================================
+// Evaluates per-channel moisture thresholds and timed daily schedules.
+// Features a 3-minute safety gap so water diffuses through soil before re-reading.
 
 int lastTriggeredMin[4] = {-1, -1, -1, -1};
 int lastTriggeredHour[4] = {-1, -1, -1, -1};
@@ -862,8 +996,8 @@ void checkAutoWatering() {
         if (isMotorBusy()) continue;
 
         // Respect the per-plant min auto-water interval.
-        // 0 hours defaults to a 10-second safety gap to prevent rapid loops.
-        unsigned long minGapMs = 10000UL;
+        // Default to a 3-minute (180s) safety gap so water diffuses through soil before re-reading.
+        unsigned long minGapMs = 180000UL;
         if (motorConfigs[i].minIntervalHours > 0) {
             unsigned long minGapSec = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
 
@@ -897,66 +1031,55 @@ void checkAutoWatering() {
     }
 }
 
-// --- SETUP MODE (SOFT AP) ---
+// =====================================================================================
+//  SECTION 10: SOFT-AP SETUP MODE (OPEN WI-FI CAPTIVE PORTAL)
+// =====================================================================================
+// Runs an open Wi-Fi Access Point (PlantPilot_Setup) with captive portal DNS redirect
+// for hassle-free network provisioning via any smartphone browser.
 
-// --- SETUP MODE (SOFT AP) ---
-// Generate a random 8-char password for the setup AP (printed to Serial)
-char setupApPassword[9];
-void generateSetupPassword() {
-    const char charset[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
-    for (int i = 0; i < 8; i++) {
-        setupApPassword[i] = charset[random(0, sizeof(charset) - 1)];
-    }
-    setupApPassword[8] = '\0';
-}
+const char SETUP_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PlantPilot — Setup</title><style>:root{--bg:#121418;--card:#1D2026;--input:#262A32;--primary:#4CAF50;--primary-glow:rgba(76,175,80,0.25);--text:#E2E8F0;--sub:#94A3B8;--border:rgba(255,255,255,0.08)}*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}.card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:400px;box-shadow:0 12px 32px rgba(0,0,0,0.4);text-align:center}.logo{width:56px;height:56px;background:var(--primary-glow);border-radius:16px;display:inline-flex;align-items:center;justify-content:center;margin:0 auto 12px}.logo svg{width:32px;height:32px;fill:var(--primary)}h1{font-size:1.4rem;font-weight:700;color:#FFF;margin-bottom:4px}p.subtitle{font-size:0.88rem;color:var(--sub);margin-bottom:24px}label{display:block;text-align:left;font-size:0.75rem;font-weight:700;color:var(--sub);margin:14px 0 6px 4px;text-transform:uppercase;letter-spacing:0.5px}select,input[type="text"],input[type="password"]{width:100%;padding:14px 16px;background:var(--input);border:1px solid var(--border);border-radius:12px;color:#FFF;font-size:0.95rem;outline:none;transition:border-color .2s}select:focus,input:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-glow)}.pass-wrapper{position:relative}.pass-wrapper input{padding-right:44px}.eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--sub);cursor:pointer;padding:4px;font-size:1.1rem}.btn{width:100%;padding:15px;background:var(--primary);color:#0A1D0C;border:none;border-radius:12px;font-size:1rem;font-weight:700;cursor:pointer;margin-top:24px;box-shadow:0 4px 16px var(--primary-glow);transition:transform .15s}.btn:active{transform:scale(0.98)}.btn-sec{background:transparent;color:var(--primary);border:1px solid var(--primary);box-shadow:none;margin-top:8px;padding:8px;font-size:0.8rem}</style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 24 24"><path d="M12,2 C12,2 6,7 6,13 C6,16.31 8.69,19 12,19 C15.31,19 18,16.31 18,13 C18,7 12,2 12,2 Z M12,17 C9.79,17 8,15.21 8,13 C8,9.17 10.74,5.43 12,4.19 C13.26,5.43 16,9.17 16,13 C16,15.21 14.21,17 12,17 Z"/></svg></div><h1>PlantPilot Setup</h1><p class="subtitle">Connect ESP32 Controller to Wi-Fi</p><form action="/save" method="POST"><label>Select Wi-Fi Network</label><select name="ssid" id="ssid" required><option disabled selected>Scanning networks...</option></select><button type="button" class="btn btn-sec" onclick="scanNetworks()">↻ Refresh Networks</button><label>Wi-Fi Password</label><div class="pass-wrapper"><input type="password" id="pass" name="pass" placeholder="Enter Wi-Fi password"><button type="button" class="eye-btn" onclick="togglePass()">👁</button></div><button type="submit" class="btn">Connect Device</button></form></div><script>function togglePass(){const x=document.getElementById("pass");x.type=x.type==="password"?"text":"password"}function scanNetworks(){const sel=document.getElementById("ssid");sel.innerHTML="<option disabled selected>Scanning networks...</option>";fetch("/api/scan").then(r=>r.json()).then(data=>{if(!data||data.length===0){sel.innerHTML="<option disabled>No networks found</option>";return}sel.innerHTML=data.map(n=>`<option value="${n.ssid}">${n.ssid} (${n.rssi} dBm)</option>`).join("")}).catch(()=>{sel.innerHTML="<option disabled>Failed to scan. Try refreshing.</option>"})}window.onload=scanNetworks;</script></body></html>)rawliteral";
 
-const char SETUP_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>PlantPilot Setup</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;background:#121212;color:#B6FF3C;padding:20px;text-align:center}select,input{width:100%;padding:12px;margin:10px 0;border:1px solid #B6FF3C;background:#1e1e1e;color:white;border-radius:8px;box-sizing:border-box}.show-pass{margin:5px 0;color:#aaa;font-size:.9em;display:flex;align-items:center;cursor:pointer}.show-pass input{width:auto;margin-right:10px}button{background:#B6FF3C;color:#121212;border:none;padding:15px;width:100%;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:10px}.refresh-btn{background:#333;color:#B6FF3C;border:1px solid #B6FF3C;margin-bottom:20px}</style><script>function togglePass(){var x=document.getElementById("pass");x.type=x.type==="password"?"text":"password"}</script></head><body><h1>PlantPilot Setup</h1><p>Connect your ESP32 to WiFi</p><button class="refresh-btn" onclick="location.reload()">Refresh Networks</button><form action="/save" method="POST"><label style="display:block;text-align:left">Select WiFi:</label><select name="ssid" required>{{SCAN_RESULTS}}</select><label style="display:block;text-align:left;margin-top:10px">Password:</label><input type="password" id="pass" name="pass" placeholder="Enter Password"><div class="show-pass"><input type="checkbox" onclick="togglePass()"> Show Password</div><label style="display:block;text-align:left;margin-top:10px">Device Password:</label><input type="password" id="devpass" name="devpass" placeholder="Enter device password shown on Serial"><button type="submit">Save and Connect</button></form></body></html>)rawliteral";
-
-const char CONNECTING_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head><title>PlantPilot Connected</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;background:#121212;color:#B6FF3C;padding:20px;text-align:center}.loader{border:4px solid #1e1e1e;border-top:4px solid #B6FF3C;border-radius:50%;width:40px;height:40px;animation:spin 2s linear infinite;margin:20px auto}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}#status{font-size:1.2em;margin-bottom:10px}.host{background:#1e1e1e;border:1px solid #333;padding:10px;border-radius:8px;margin:10px 0;color:white;font-weight:bold}#ip-box{background:#1e1e1e;border:1px solid #B6FF3C;padding:15px;border-radius:8px;margin:20px 0;display:none}.note{color:#aaa;font-size:.9em;margin-bottom:8px}#ip{font-size:1.5em;font-weight:bold;color:white;display:block;margin-bottom:10px}button{background:#B6FF3C;color:#121212;border:none;padding:10px 20px;font-weight:bold;border-radius:5px;cursor:pointer}#countdown{margin-top:20px;color:#aaa;display:none}</style><script>let connected=false;function checkStatus(){fetch('/api/wifi_status').then(r=>r.json()).then(data=>{if(data.status===3&&data.ip!=="0.0.0.0"){document.getElementById("status").innerText="Connected!";document.getElementById("ip").innerText=data.ip;document.getElementById("ip-box").style.display="block";document.querySelector(".loader").style.display="none";document.getElementById("countdown").style.display="block";if(!connected){connected=true;startCountdown()}}else{setTimeout(checkStatus,1000)}}).catch(()=>setTimeout(checkStatus,1000))}function copyIp(){const ip=document.getElementById("ip").innerText;navigator.clipboard.writeText(ip).then(()=>{const btn=document.getElementById("copy-btn");btn.innerText="Copied!";setTimeout(()=>btn.innerText="Copy IP",2000)})}function startCountdown(){let count=10;const timer=setInterval(()=>{count--;if(count<=0){count=0;clearInterval(timer)}document.getElementById("timer").innerText=count},1000)}window.onload=checkStatus;</script></head><body><h1>PlantPilot</h1><div id="status">Connecting to WiFi...</div><div class="loader"></div><div class="host">App connects to <b>plantpilot.local</b> by default</div><div id="ip-box"><div class="note">If the app can't connect, enter this IP:</div><span id="ip"></span><button id="copy-btn" onclick="copyIp()">Copy IP</button></div><div id="countdown">Restarting in <span id="timer">10</span> seconds...</div></body></html>)rawliteral";
-
-String getScanResults() {
-    int n = WiFi.scanNetworks();
-    String options = "";
-    if (n <= 0) {
-        options = "<option disabled>No networks found</option>";
-    } else {
-        for (int i = 0; i < n; ++i) {
-            options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)</option>";
-        }
-    }
-    WiFi.scanDelete();
-    return options;
-}
+const char CONNECTING_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PlantPilot — Connecting</title><style>:root{--bg:#121418;--card:#1D2026;--primary:#4CAF50;--primary-glow:rgba(76,175,80,0.25);--text:#E2E8F0;--sub:#94A3B8;--border:rgba(255,255,255,0.08)}*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}.card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:400px;box-shadow:0 12px 32px rgba(0,0,0,0.4);text-align:center}.spinner{width:44px;height:44px;border:3px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin 1s linear infinite;margin:16px auto}@keyframes spin{to{transform:rotate(0deg)}}h1{font-size:1.3rem;font-weight:700;color:#FFF;margin-bottom:8px}p{font-size:0.9rem;color:var(--sub);margin-bottom:16px}.ip-box{background:#262A32;border:1px solid var(--primary);border-radius:12px;padding:16px;margin:20px 0;display:none}.ip-text{font-size:1.4rem;font-weight:700;color:var(--primary);margin-bottom:8px;font-family:monospace}.btn{width:100%;padding:12px;background:var(--primary);color:#0A1D0C;border:none;border-radius:10px;font-size:0.95rem;font-weight:700;cursor:pointer}</style></head><body><div class="card"><div class="spinner" id="spinner"></div><h1 id="title">Connecting to Wi-Fi...</h1><p id="sub">ESP32 is joining your home network.</p><div class="ip-box" id="ip-box"><p style="color:var(--sub);font-size:0.8rem;margin-bottom:4px">Assigned Local IP Address:</p><div class="ip-text" id="ip-val">0.0.0.0</div><button class="btn" id="copy-btn" onclick="copyIp()">Copy IP</button></div><p id="restart-msg" style="font-size:0.8rem;color:var(--sub);display:none">Restarting in <span id="timer">10</span>s...</p></div><script>let done=false;function check(){fetch('/api/wifi_status').then(r=>r.json()).then(d=>{if(d.status===3&&d.ip&&d.ip!=="0.0.0.0"){document.getElementById("spinner").style.display="none";document.getElementById("title").innerText="Connected Successfully!";document.getElementById("sub").innerText="Your ESP32 is online. The app will discover it automatically via plantpilot.local.";document.getElementById("ip-val").innerText=d.ip;document.getElementById("ip-box").style.display="block";document.getElementById("restart-msg").style.display="block";if(!done){done=true;count()}}else{setTimeout(check,1000)}}).catch(()=>setTimeout(check,1000))}function copyIp(){const ip=document.getElementById("ip-val").innerText;navigator.clipboard.writeText(ip).then(()=>{const b=document.getElementById("copy-btn");b.innerText="Copied!";setTimeout(()=>b.innerText="Copy IP",2000)})}function count(){let c=10;const t=setInterval(()=>{c--;document.getElementById("timer").innerText=c;if(c<=0)clearInterval(t)},1000)}window.onload=check;</script></body></html>)rawliteral";
 
 void startSetupMode() {
     setupModeActive = true;
-    generateSetupPassword();
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(SETUP_SSID, setupApPassword);
+    WiFi.softAP(SETUP_SSID); // Open Wi-Fi network (No password required)
     Serial.println("[SETUP] ==============================");
     Serial.println("[SETUP] SETUP MODE ACTIVE");
-    Serial.printf("[SETUP] Connect to WiFi network: %s\n", SETUP_SSID);
-    Serial.printf("[SETUP] AP Password: %s\n", setupApPassword);
+    Serial.printf("[SETUP] Connect to open WiFi network: %s\n", SETUP_SSID);
     Serial.printf("[SETUP] Setup page: http://%s\n", WiFi.softAPIP().toString().c_str());
     Serial.println("[SETUP] Open browser, choose your network, save credentials.");
     Serial.println("[SETUP] ==============================");
     dnsServer.start(53, "*", WiFi.softAPIP());
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        String html = String(FPSTR(SETUP_HTML));
-        html.replace("{{SCAN_RESULTS}}", getScanResults());
-        request->send(200, "text/html", html);
+        request->send(200, "text/html", String(FPSTR(SETUP_HTML)));
+    });
+    server.on("/api/scan", HTTP_GET, [](AsyncWebServerRequest *request){
+        int count = WiFi.scanComplete();
+        if (count < 0) {
+            WiFi.scanNetworks();
+            count = WiFi.scanComplete();
+        }
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        if (count > 0) {
+            for (int i = 0; i < count; ++i) {
+                JsonObject net = arr.add<JsonObject>();
+                net["ssid"] = WiFi.SSID(i);
+                net["rssi"] = WiFi.RSSI(i);
+            }
+            WiFi.scanDelete();
+        }
+        String jsonStr;
+        serializeJson(doc, jsonStr);
+        request->send(200, "application/json", jsonStr);
     });
     server.on("/api/wifi_status", HTTP_GET, [](AsyncWebServerRequest *request){
         JsonDocument doc; doc["status"] = (int)WiFi.status(); doc["ip"] = WiFi.localIP().toString(); doc["time"] = getNow();
         String response; serializeJson(doc, response); request->send(200, "application/json", response);
     });
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
-        // Validate device password
-        String devPass = request->arg("devpass");
-        if (devPass != String(setupApPassword)) {
-            request->send(403, "text/html", "<html><body style='background:#121212;color:#ff4444;padding:40px;text-align:center;font-family:sans-serif'><h2>Wrong device password</h2><p>Check the Serial monitor for the correct password.</p><a href='/' style='color:#B6FF3C'>Go back</a></body></html>");
-            return;
-        }
         preferences.begin("wifi", false); preferences.putString("ssid", request->arg("ssid")); preferences.putString("pass", request->arg("pass")); preferences.end();
         WiFi.begin(request->arg("ssid").c_str(), request->arg("pass").c_str());
         request->send(200, "text/html", String(FPSTR(CONNECTING_HTML)));
@@ -966,7 +1089,10 @@ void startSetupMode() {
     server.begin();
 }
 
-// --- API HANDLERS ---
+// =====================================================================================
+//  SECTION 11: WEBSOCKET & REST API COMMUNICATIONS ENGINE
+// =====================================================================================
+// Provides real-time bidirectional WebSocket interface (/ws) and REST HTTP fallback endpoints.
 
 // Reused small response doc + buffer (ok / pump state ACKs) to keep the WS
 // event-task path free of per-message heap alloc/free churn.
@@ -986,7 +1112,7 @@ void sendOkResponse(AsyncWebSocketClient *client, const String& cmd, bool withPu
     doc["cmd"] = cmd;
     if (withPumps) {
         JsonArray arr = doc["pumps"].to<JsonArray>();
-        for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn);
+        for (int i = 0; i < 4; i++) arr.add(pumps[i].isOn || startQueue[i].pending);
     }
     serializeJson(doc, localBuf, sizeof(localBuf));
     sendWsRaw(client, localBuf);
@@ -999,8 +1125,9 @@ void sendStatusResponse() {
     respDoc.clear();
     JsonDocument &doc = respDoc;
     doc["type"] = "status";
+    doc["sensor_cadence_sec"] = savedCadenceSec;
     JsonArray pumpsArr = doc["pumps"].to<JsonArray>();
-    for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn);
+    for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn || startQueue[i].pending);
     JsonArray motors = doc["motors"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
         JsonObject m = motors.add<JsonObject>();
@@ -1059,10 +1186,16 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         // App signals its lifecycle: foreground 1s, background 3s. Clamped so a
         // bad value can't starve or flood the stream.
         int seconds = cmd.substring(10).toInt();
-        if (seconds < 1) seconds = 1;
+        if (seconds < 3) seconds = 3;
         if (seconds > 30) seconds = 30;
         streamCadenceMs = (unsigned long)seconds * 1000UL;
-        Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums)\n", getLocalTimeStr(), seconds, streamCadenceMs);
+        if (seconds != savedCadenceSec) {
+            savedCadenceSec = seconds;
+            preferences.begin("plantpilot", false);
+            preferences.putInt("cadence", seconds);
+            preferences.end();
+            Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums, saved to NVS)\n", getLocalTimeStr(), seconds, streamCadenceMs);
+        }
 
         JsonDocument okDoc;
         char localBuf[256];
@@ -1145,6 +1278,7 @@ void setupApi() {
     // whatever is newer on the device side (two-way sync).
     server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
         JsonDocument doc;
+        doc["sensor_cadence_sec"] = savedCadenceSec;
         JsonArray motors = doc["motors"].to<JsonArray>();
         for (int i = 0; i < 4; i++) {
             JsonObject m = motors.add<JsonObject>();
@@ -1385,53 +1519,93 @@ void setupApi() {
     }
 }
 
+const char* getWifiReasonStr(uint8_t reason) {
+    switch (reason) {
+        case 1:   return "UNSPECIFIED";
+        case 2:   return "AUTH_EXPIRE";
+        case 3:   return "AUTH_LEAVE";
+        case 4:   return "ASSOC_EXPIRE";
+        case 5:   return "ASSOC_TOOMANY";
+        case 6:   return "NOT_AUTHED";
+        case 7:   return "NOT_ASSOCED";
+        case 8:   return "ASSOC_LEAVE";
+        case 15:  return "4WAY_HANDSHAKE_TIMEOUT / BAD_PASSWORD";
+        case 201: return "NO_AP_FOUND / NOT_IN_RANGE";
+        case 202: return "AUTH_FAIL / BAD_PASSWORD";
+        case 203: return "ASSOC_FAIL";
+        case 204: return "HANDSHAKE_TIMEOUT";
+        case 205: return "CONNECTION_FAIL";
+        default:  return "UNKNOWN_REASON";
+    }
+}
+
+// =====================================================================================
+//  SECTION 12: WEBSOCKET EVENT DISPATCHER & COMMAND PARSER
+// =====================================================================================
+
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-            Serial.printf("[%s] [WIFI] Connected to AP: %s\n", getLocalTimeStr(), WiFi.SSID().c_str());
+            Serial.printf("[%s] [WIFI] Connected to AP: '%s'\n", getLocalTimeStr(), WiFi.SSID().c_str());
             break;
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            Serial.printf("[%s] [WIFI] IP: %s (RSSI: %d dBm)\n", getLocalTimeStr(), WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+            Serial.printf("[%s] [WIFI] IP Assigned: %s (Subnet: %s, GW: %s, RSSI: %d dBm)\n",
+                getLocalTimeStr(),
+                WiFi.localIP().toString().c_str(),
+                WiFi.subnetMask().toString().c_str(),
+                WiFi.gatewayIP().toString().c_str(),
+                (int)WiFi.RSSI());
             wasConnected = true;
-            // Force power-save OFF for Rev 1.0 silicon stability (Modem sleep bugs)
-            WiFi.setSleep(WIFI_PS_NONE);
-            // After setup-mode credentials are saved, restart 10s after getting
-            // an IP so the device comes up in normal STA mode (matches the page
-            // countdown).
+            // Enable modem sleep between telemetry bursts to reduce thermal load and power consumption
+            WiFi.setSleep(WIFI_PS_MIN_MODEM);
             if (pendingRestart) { restartTime = millis() + 10000; }
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             lastWiFiReason = info.wifi_sta_disconnected.reason;
             cachedWifiSsid = "";
-            if (wasConnected) { Serial.printf("[%s] [WIFI] Lost, Reason: %d\n", getLocalTimeStr(), lastWiFiReason); wasConnected = false; }
+            Serial.printf("[%s] [WIFI] Disconnected! Reason Code %d: %s\n",
+                getLocalTimeStr(), lastWiFiReason, getWifiReasonStr(lastWiFiReason));
+            wasConnected = false;
             break;
         default: break;
     }
 }
 
+// =====================================================================================
+//  SECTION 13: SYSTEM INITIALIZATION & MAIN EXECUTION LOOP
+// =====================================================================================
+
 void setup() {
-    Serial.begin(115200); delay(500); Serial.printf("\n[%s] [SYSTEM] Booting PlantPilot...\n", getLocalTimeStr());
-    // Map reset reason to a readable string (esp_reset_reason_str is not
-    // available on all core versions).
+    Serial.begin(115200);
+    delay(500);
+    Serial.println("\n=============================================");
+    Serial.println("         PlantPilot ESP32 Firmware           ");
+    Serial.println("=============================================");
+
     const char* resetReason;
     switch (esp_reset_reason()) {
-        case ESP_RST_POWERON:     resetReason = "POWERON"; break;
-        case ESP_RST_EXT:         resetReason = "EXTERNAL"; break;
-        case ESP_RST_SW:          resetReason = "SOFTWARE"; break;
-        case ESP_RST_PANIC:       resetReason = "PANIC"; break;
-        case ESP_RST_INT_WDT:     resetReason = "INTERRUPT_WATCHDOG"; break;
-        case ESP_RST_TASK_WDT:    resetReason = "TASK_WATCHDOG"; break;
+        case ESP_RST_POWERON:     resetReason = "POWER_ON (Cold Boot)"; break;
+        case ESP_RST_EXT:         resetReason = "EXTERNAL_RESET (EN Pin / Reset Button)"; break;
+        case ESP_RST_SW:          resetReason = "SOFTWARE_RESET (ESP.restart)"; break;
+        case ESP_RST_PANIC:       resetReason = "PANIC / CRASH (Exception / Core Dump)"; break;
+        case ESP_RST_INT_WDT:     resetReason = "INTERRUPT_WATCHDOG (CPU Deadlock)"; break;
+        case ESP_RST_TASK_WDT:    resetReason = "TASK_WATCHDOG (Loop Freeze)"; break;
         case ESP_RST_WDT:         resetReason = "OTHER_WATCHDOG"; break;
-        case ESP_RST_DEEPSLEEP:   resetReason = "DEEP_SLEEP"; break;
-        case ESP_RST_BROWNOUT:
-            resetReason = "BROWNOUT";
-            Serial.println("[WARNING] Brownout detected! Check your power supply. Driving 4 relays may require 2A+.");
-            break;
+        case ESP_RST_DEEPSLEEP:   resetReason = "DEEP_SLEEP_AWAKE"; break;
+        case ESP_RST_BROWNOUT:    resetReason = "BROWNOUT_WARNING (Power Supply Sag < 4.5V)"; break;
         case ESP_RST_SDIO:        resetReason = "SDIO"; break;
         default:                  resetReason = "UNKNOWN"; break;
     }
-    Serial.printf("[SYSTEM] Reset reason: %s, free heap: %u bytes\n", resetReason, ESP.getFreeHeap());
-    initStatusLed(); initRelays(); loadConfigs(); initChannelPolling();
+    Serial.printf("[SYSTEM] Boot Reset Reason : %s\n", resetReason);
+    Serial.printf("[SYSTEM] Chip Model & Rev  : %s (Rev %d, %d Cores @ %d MHz)\n",
+        ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(), ESP.getCpuFreqMHz());
+    Serial.printf("[SYSTEM] Flash Memory      : %u KB @ %u MHz\n",
+        ESP.getFlashChipSize() / 1024, ESP.getFlashChipSpeed() / 1000000);
+    Serial.printf("[SYSTEM] MAC Address       : %s\n", WiFi.macAddress().c_str());
+    Serial.printf("[SYSTEM] Initial Free Heap : %u bytes (Min: %u bytes)\n",
+        ESP.getFreeHeap(), ESP.getMinFreeHeap());
+    Serial.println("=============================================\n");
+    initStatusLed(); initButton(); initRelays(); loadConfigs(); initChannelPolling();
 
     // Load persisted time and rebase against current boot millis
     preferences.begin("time", true);
@@ -1444,7 +1618,7 @@ void setup() {
     }
 
     WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
-    WiFi.setSleep(WIFI_PS_NONE);
+    WiFi.setSleep(WIFI_PS_MIN_MODEM);
     preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
     if (ssid.length() > 0) { Serial.printf("[%s] [WIFI] Target: %s\n", getLocalTimeStr(), ssid.c_str()); WiFi.begin(ssid.c_str(), pass.c_str()); }
     else { Serial.printf("[%s] [WIFI] No credentials. Setup Mode.\n", getLocalTimeStr()); startSetupMode(); }
@@ -1456,10 +1630,6 @@ void setup() {
                 getLocalTimeStr(), client->remoteIP().toString().c_str(), ws.count(), ESP.getFreeHeap());
             client->text("PlantPilot Ready");
             Serial.println("[WS] TX: PlantPilot Ready");
-            // Server-side keepalive: send WS ping frames every 5 s so the
-            // TCP link stays alive through brief power-rail glitches caused
-            // by relay switching during watering.
-            client->keepAlivePeriod(5);
             // New client always gets telemetry, regardless of pause state.
             telemetryPaused = false;
             // Include full per-motor config in the first telemetry frame so a
@@ -1502,6 +1672,7 @@ void setup() {
 void loop() {
     unsigned long loopStart = millis();
     updateStatusLed();
+    updateButton();
 
     // 1. Process Global Start Queue (Power Safety - Non-blocking)
     // Sequential Scheduling: Only trigger a queued pump if no other motor is running.
@@ -1668,4 +1839,7 @@ void loop() {
         lastLoopReset = loopStart;
     }
     if (loopMs > maxLoopMs) maxLoopMs = loopMs;
+
+    // Yield 1ms to FreeRTOS IDLE task to reduce CPU temperature & power load
+    delay(1);
 }

@@ -59,7 +59,7 @@ fun PumpTestingScreen(
 
     val terminalScroll = rememberScrollState()
     LaunchedEffect(terminalLogs.size) {
-        terminalScroll.animateScrollTo(Int.MAX_VALUE)
+        terminalScroll.animateScrollTo(0)
     }
 
     Scaffold(
@@ -87,17 +87,15 @@ fun PumpTestingScreen(
                 .padding(paddingValues)
                 .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
         ) {
-            // Scrollable pump controls — fills available space
+            // Compact pump controls section
             Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // Data activity indicator
                 DataActivityIndicator(isActive = canDisplayLastKnownData || displayConnectionState == com.plantpilot.data.ConnectionState.Connecting, isConnecting = displayConnectionState == com.plantpilot.data.ConnectionState.Connecting, isReconnecting = displayConnectionState == com.plantpilot.data.ConnectionState.Reconnecting)
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 // Section Header
                 Row(
@@ -143,7 +141,7 @@ fun PumpTestingScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Output Terminal
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -167,7 +165,7 @@ fun PumpTestingScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(0.7f)
+                    .weight(1f)
                     .animateContentSize()
                     .clip(RoundedCornerShape(12.dp))
                     .background(TerminalBackground)
@@ -176,20 +174,14 @@ fun PumpTestingScreen(
             ) {
                 if (terminalLogs.isEmpty()) {
                     Text(
-                        text = if (canDisplayLastKnownData) "Waiting for pump events..." else "Device offline",
+                        text = if (canSendCommands) "Waiting for pump events..." else "Device offline",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
                         color = TerminalPlaceholder
                     )
                 } else {
-                    terminalLogs.asReversed().forEach { line ->
-                        Text(
-                            text = line,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            color = if (line.contains("error", ignoreCase = true)) LogError else TerminalGreen
-                        )
+                    terminalLogs.forEach { line ->
+                        com.plantpilot.ui.components.LogLine(line)
                     }
                 }
             }
@@ -216,7 +208,7 @@ fun PumpRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 2.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(

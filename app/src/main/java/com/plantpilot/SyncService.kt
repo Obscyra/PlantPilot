@@ -58,15 +58,12 @@ class SyncService : Service() {
         // backgrounded so Android's Doze can't suspend the WebSocket that
         // streams telemetry from the ESP32. Released on stop.
         acquireWakeLock()
-        // Reconnect loop: keeps the connection alive while the service is running.
-        // Handles the case where the process was killed while backgrounded or
-        // where the WebSocket retry loop gave up after reaching MAX_RETRY_ATTEMPTS.
-        // The service nudges the HardwareConnection every 60s if not connected.
-        reconnectJob?.cancel()
-        reconnectJob = serviceScope.launch {
-            while (isActive) {
-                reconnectIfNeeded()
-                delay(60000L) // 1 minute check interval
+        if (reconnectJob?.isActive != true) {
+            reconnectJob = serviceScope.launch {
+                while (isActive) {
+                    reconnectIfNeeded()
+                    delay(60000L) // 1 minute check interval
+                }
             }
         }
         return START_STICKY

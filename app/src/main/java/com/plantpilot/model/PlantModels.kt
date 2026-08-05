@@ -88,6 +88,6 @@ data class AppSettings(
     val useMetricUnits: Boolean,
     val use24HourFormat: Boolean,
     val maxRuntimeMinutes: Int = 1,
-    val sensorCadenceSec: Int = 3,
+    val sensorCadenceSec: Int = 12,
     val pumpFlowRateMlPerSec: Int = 10
 )

@@ -63,18 +63,16 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // Drive telemetry cadence and the background sync service from the app's
-        // lifecycle so the ESP32 streams at the user-configured cadence in the
-        // foreground and 3s while the app is backgrounded but not closed. The
-        // foreground service is started here (app is foreground, always permitted)
-        // and only stopped when the app is fully closed (onTaskRemoved), keeping
-        // the process — and thus the WebSocket — alive in the background.
+        try {
+            ContextCompat.startForegroundService(this, Intent(this, SyncService::class.java))
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to start SyncService", e)
+        }
+
         lifecycle.addObserver(LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
-                    startForegroundService(Intent(this, SyncService::class.java))
                     hardwareConnection.setIsBackgrounded(false)
-                    hardwareConnection.resumeTelemetry()
                     hardwareConnection.setStreamCadence(viewModel.settings.value.sensorCadenceSec)
                 }
                 Lifecycle.Event.ON_RESUME -> {
@@ -84,7 +82,7 @@ class MainActivity : ComponentActivity() {
                 }
                 Lifecycle.Event.ON_STOP -> {
                     hardwareConnection.setIsBackgrounded(true)
-                    hardwareConnection.pauseTelemetry()
+                    hardwareConnection.setStreamCadence(30)
                 }
                 else -> {}
             }

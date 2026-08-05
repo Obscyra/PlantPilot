@@ -59,12 +59,11 @@ class HistoryManager(
     }
 
     fun processOfflineEvent(event: DeviceWateringEvent) {
-        if (event.epoch <= 0) return
         val plant = plantsFlow.value.find { it.motorNumber == event.motor } ?: return
-        val timestamp = event.epoch * 1000L
+        val timestamp = if (event.epoch > 0) event.epoch * 1000L else System.currentTimeMillis()
 
-        // Check if we already have this event in history (simple deduplication by timestamp/motor)
-        if (historyFlow.value.any { it.motorNumber == event.motor && it.timestamp == timestamp }) return
+        // Check if we already have this event in history (deduplication by motor & 2s time window)
+        if (historyFlow.value.any { it.motorNumber == event.motor && kotlin.math.abs(it.timestamp - timestamp) < 2000L }) return
 
         val newEvent = WateringEvent(
             id = UUID.randomUUID().toString(),
