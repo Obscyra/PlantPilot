@@ -183,82 +183,100 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 enterTransition = {
                     val initialRoute = initialState.destination.route
                     val targetRoute = targetState.destination.route
-
                     val initialIndex = bottomNavItems.indexOfFirst { it.route == initialRoute }
                     val targetIndex = bottomNavItems.indexOfFirst { it.route == targetRoute }
 
-                    val direction = when {
-                        initialIndex != -1 && targetIndex != -1 -> {
-                            if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
-                            else AnimatedContentTransitionScope.SlideDirection.End
-                        }
-                        else -> AnimatedContentTransitionScope.SlideDirection.Start
-                    }
+                    val duration = 350
+                    val easing = androidx.compose.animation.core.FastOutSlowInEasing
 
-                    fadeIn(animationSpec = tween(400)) + slideIntoContainer(
-                        towards = direction,
-                        animationSpec = tween(400)
-                    )
+                    if (initialIndex != -1 && targetIndex != -1) {
+                        val direction = if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
+                                        else AnimatedContentTransitionScope.SlideDirection.End
+                        fadeIn(animationSpec = tween(duration, easing = easing)) +
+                        slideIntoContainer(
+                            towards = direction,
+                            animationSpec = tween(duration, easing = easing),
+                            initialOffset = { (it * 0.25f).toInt() }
+                        )
+                    } else {
+                        fadeIn(animationSpec = tween(duration, easing = easing)) +
+                        slideIntoContainer(
+                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                            animationSpec = tween(duration, easing = easing)
+                        )
+                    }
                 },
                 exitTransition = {
                     val initialRoute = initialState.destination.route
                     val targetRoute = targetState.destination.route
-
                     val initialIndex = bottomNavItems.indexOfFirst { it.route == initialRoute }
                     val targetIndex = bottomNavItems.indexOfFirst { it.route == targetRoute }
 
-                    val direction = when {
-                        initialIndex != -1 && targetIndex != -1 -> {
-                            if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
-                            else AnimatedContentTransitionScope.SlideDirection.End
-                        }
-                        else -> AnimatedContentTransitionScope.SlideDirection.Start
-                    }
+                    val duration = 350
+                    val easing = androidx.compose.animation.core.FastOutSlowInEasing
 
-                    fadeOut(animationSpec = tween(400)) + slideOutOfContainer(
-                        towards = direction,
-                        animationSpec = tween(400)
-                    )
+                    if (initialIndex != -1 && targetIndex != -1) {
+                        val direction = if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
+                                        else AnimatedContentTransitionScope.SlideDirection.End
+                        fadeOut(animationSpec = tween(duration, easing = easing)) +
+                        slideOutOfContainer(
+                            towards = direction,
+                            animationSpec = tween(duration, easing = easing),
+                            targetOffset = { (it * 0.25f).toInt() }
+                        )
+                    } else {
+                        fadeOut(animationSpec = tween(duration, easing = easing)) +
+                        scaleOut(targetScale = 0.95f, animationSpec = tween(duration, easing = easing))
+                    }
                 },
                 popEnterTransition = {
                     val initialRoute = initialState.destination.route
                     val targetRoute = targetState.destination.route
-
                     val initialIndex = bottomNavItems.indexOfFirst { it.route == initialRoute }
                     val targetIndex = bottomNavItems.indexOfFirst { it.route == targetRoute }
 
-                    val direction = when {
-                        initialIndex != -1 && targetIndex != -1 -> {
-                            if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
-                            else AnimatedContentTransitionScope.SlideDirection.End
-                        }
-                        else -> AnimatedContentTransitionScope.SlideDirection.End
-                    }
+                    val duration = 350
+                    val easing = androidx.compose.animation.core.FastOutSlowInEasing
 
-                    fadeIn(animationSpec = tween(400)) + slideIntoContainer(
-                        towards = direction,
-                        animationSpec = tween(400)
-                    )
+                    if (initialIndex != -1 && targetIndex != -1) {
+                        val direction = if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
+                                        else AnimatedContentTransitionScope.SlideDirection.End
+                        fadeIn(animationSpec = tween(duration, easing = easing)) +
+                        slideIntoContainer(
+                            towards = direction,
+                            animationSpec = tween(duration, easing = easing),
+                            initialOffset = { (it * 0.25f).toInt() }
+                        )
+                    } else {
+                        fadeIn(animationSpec = tween(duration, easing = easing)) +
+                        scaleIn(initialScale = 0.95f, animationSpec = tween(duration, easing = easing))
+                    }
                 },
                 popExitTransition = {
                     val initialRoute = initialState.destination.route
                     val targetRoute = targetState.destination.route
-
                     val initialIndex = bottomNavItems.indexOfFirst { it.route == initialRoute }
                     val targetIndex = bottomNavItems.indexOfFirst { it.route == targetRoute }
 
-                    val direction = when {
-                        initialIndex != -1 && targetIndex != -1 -> {
-                            if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
-                            else AnimatedContentTransitionScope.SlideDirection.End
-                        }
-                        else -> AnimatedContentTransitionScope.SlideDirection.End
-                    }
+                    val duration = 350
+                    val easing = androidx.compose.animation.core.FastOutSlowInEasing
 
-                    fadeOut(animationSpec = tween(400)) + slideOutOfContainer(
-                        towards = direction,
-                        animationSpec = tween(400)
-                    )
+                    if (initialIndex != -1 && targetIndex != -1) {
+                        val direction = if (targetIndex > initialIndex) AnimatedContentTransitionScope.SlideDirection.Start
+                                        else AnimatedContentTransitionScope.SlideDirection.End
+                        fadeOut(animationSpec = tween(duration, easing = easing)) +
+                        slideOutOfContainer(
+                            towards = direction,
+                            animationSpec = tween(duration, easing = easing),
+                            targetOffset = { (it * 0.25f).toInt() }
+                        )
+                    } else {
+                        fadeOut(animationSpec = tween(duration, easing = easing)) +
+                        slideOutOfContainer(
+                            towards = AnimatedContentTransitionScope.SlideDirection.End,
+                            animationSpec = tween(duration, easing = easing)
+                        )
+                    }
                 }
             ) {
                 composable(Screen.Home.route) {
@@ -358,8 +376,18 @@ fun PlantPilotApp(viewModel: PlantPilotViewModel) {
                 }
             }
 
-            if (isWateringPlantId != null) {
-                WateringOverlay(plantName = wateringPlantName)
+            val currentPlantName = plants.find { it.id == isWateringPlantId }?.name
+            var lastWateringPlantName by remember { mutableStateOf("") }
+            if (!currentPlantName.isNullOrEmpty()) {
+                lastWateringPlantName = currentPlantName
+            }
+
+            AnimatedVisibility(
+                visible = isWateringPlantId != null,
+                enter = fadeIn(animationSpec = tween(400)) + scaleIn(initialScale = 0.92f, animationSpec = tween(400)),
+                exit = fadeOut(animationSpec = tween(400)) + scaleOut(targetScale = 0.92f, animationSpec = tween(400))
+            ) {
+                WateringOverlay(plantName = lastWateringPlantName)
             }
         }
     }

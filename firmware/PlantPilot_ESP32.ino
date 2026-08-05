@@ -316,7 +316,8 @@ void initChannelPolling() {
     for (int i = 0; i < 4; i++) {
         channelPoll[i].nextReadDueMs = 0; // read immediately on first check
         channelPoll[i].currentIntervalMs = SENSOR_READ_INTERVAL_MS;
-        channelPoll[i].lastMoisture = 50;
+        soilMoisture[i] = readMoisture(i);
+        channelPoll[i].lastMoisture = soilMoisture[i];
         channelPoll[i].active = motorConfigs[i].autoMode || motorConfigs[i].scheduleCount > 0;
     }
 }
@@ -325,14 +326,17 @@ void initChannelPolling() {
 void refreshChannelPolling() {
     for (int i = 0; i < 4; i++) {
         channelPoll[i].active = motorConfigs[i].autoMode || motorConfigs[i].scheduleCount > 0;
-        if (channelPoll[i].active) recomputeChannelInterval(i);
+        if (channelPoll[i].active) {
+            channelPoll[i].nextReadDueMs = 0; // Force immediate sensor read on mode/threshold update
+            recomputeChannelInterval(i);
+        }
     }
 }
 
 // Called after a motor finishes watering to reset its polling schedule.
 void onWateringComplete(int i) {
     if (i >= 0 && i < 4) {
-        channelPoll[i].nextReadDueMs = millis() + 60000UL; // re-read 60s after completion
+        channelPoll[i].nextReadDueMs = millis() + 15000UL; // re-read 15s after completion
         recomputeChannelInterval(i);
     }
 }
@@ -987,6 +991,8 @@ void checkSchedules() {
 void checkAutoWatering() {
     unsigned long nowMs = millis();
     unsigned long nowEpoch = getNow();
+    bool isAppConnected = (ws.count() > 0);
+
     for (int i = 0; i < 4; i++) {
         if (!motorConfigs[i].isEnabled || !motorConfigs[i].autoMode) continue;
         // Skip if pump is already running or start is queued (avoids redundant ADC reads)
@@ -996,8 +1002,8 @@ void checkAutoWatering() {
         if (isMotorBusy()) continue;
 
         // Respect the per-plant min auto-water interval.
-        // Default to a 3-minute (180s) safety gap so water diffuses through soil before re-reading.
-        unsigned long minGapMs = 180000UL;
+        // 10s default safety gap so water diffuses through soil before re-triggering.
+        unsigned long minGapMs = 10000UL;
         if (motorConfigs[i].minIntervalHours > 0) {
             unsigned long minGapSec = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
 
@@ -1012,9 +1018,13 @@ void checkAutoWatering() {
         // 2. Check session-based millis (protects against rapid loops even if NTP is broken)
         if (lastAutoWaterTime[i] != 0 && (nowMs - lastAutoWaterTime[i]) < minGapMs) continue;
 
-        // Per-channel adaptive sensor read: read only when the channel's
-        // deadline has arrived (set by recomputeChannelInterval or boot).
-        if (nowMs >= channelPoll[i].nextReadDueMs) {
+        // Dual-mode Sensor Reading & Auto Triggering:
+        // When App is open (isAppConnected == true): read raw sensor & evaluate auto-watering continuously in real-time.
+        // When App is closed (isAppConnected == false): evaluate on the idle adaptive nextReadDueMs cadence to preserve probe health.
+        if (isAppConnected) {
+            soilMoisture[i] = readMoisture(i);
+            channelPoll[i].lastMoisture = soilMoisture[i];
+        } else if (nowMs >= channelPoll[i].nextReadDueMs || channelPoll[i].nextReadDueMs == 0) {
             soilMoisture[i] = readMoisture(i);
             channelPoll[i].lastMoisture = soilMoisture[i];
             channelPoll[i].nextReadDueMs = nowMs + channelPoll[i].currentIntervalMs;
@@ -1023,6 +1033,7 @@ void checkAutoWatering() {
                 getLocalTimeStr(), pumps[i].name, soilMoisture[i],
                 channelPoll[i].currentIntervalMs / 1000);
         }
+
         int moisture = soilMoisture[i];
         if (moisture < motorConfigs[i].moistureThreshold) {
             Serial.printf("[%s] [AUTO] Low moisture on %s: %d%% < %d%%. Queuing start.\n", getLocalTimeStr(), pumps[i].name, moisture, motorConfigs[i].moistureThreshold);

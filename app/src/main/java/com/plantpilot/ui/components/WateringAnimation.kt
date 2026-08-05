@@ -1,23 +1,23 @@
 package com.plantpilot.ui.components
 
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.Canvas
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.plantpilot.ui.theme.NeonGreen
-import kotlin.math.sin
+import androidx.compose.ui.viewinterop.AndroidView
+import com.plantpilot.R
 
 @Composable
 fun WateringOverlay(
@@ -33,7 +33,11 @@ fun WateringOverlay(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            WateringScene(modifier = Modifier.size(320.dp))
+            WateringScene(
+                modifier = Modifier
+                    .size(320.dp)
+                    .clip(RoundedCornerShape(24.dp))
+            )
 
             Spacer(modifier = Modifier.height(48.dp))
 
@@ -55,195 +59,94 @@ fun WateringOverlay(
 
 @Composable
 fun WateringScene(modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "watering_scene")
-    
-    val tilt by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 45f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "tilt"
-    )
+    val context = LocalContext.current
 
-    val sway by infiniteTransition.animateFloat(
-        initialValue = -2f,
-        targetValue = 2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "sway"
-    )
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                TextureView(ctx).apply {
+                    val textureView = this
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        private var mediaPlayer: MediaPlayer? = null
 
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val center = Offset(size.width / 2, size.height / 2)
-            
-            // Draw Pot
-            drawPot(center.x, center.y + 120f)
-            
-            // Draw Plant
-            withTransform({
-                translate(center.x, center.y + 80f)
-                rotate(sway, pivot = Offset(0f, 40f))
-            }) {
-                drawPlant()
-            }
+                        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                            try {
+                                val afd = ctx.resources.openRawResourceFd(R.raw.watering_animation) ?: return
+                                mediaPlayer = MediaPlayer().apply {
+                                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                                    afd.close()
+                                    setSurface(Surface(surface))
+                                    isLooping = true
+                                    setVolume(0f, 0f)
 
-            // Draw Watering Can
-            withTransform({
-                translate(center.x + 140f, center.y - 120f)
-                rotate(-tilt, pivot = Offset(-50f, 50f))
-            }) {
-                drawWateringCan()
-            }
+                                    setOnVideoSizeChangedListener { _, vWidth, vHeight ->
+                                        if (vWidth > 0 && vHeight > 0) {
+                                            adjustAspectRatio(textureView, vWidth, vHeight)
+                                        }
+                                    }
 
-            // Draw Water Drops (only when tilted)
-            if (tilt > 20f) {
-                val flowIntensity = (tilt - 20f) / 25f
-                drawWaterDrops(
-                    startX = center.x + 50f,
-                    startY = center.y - 110f,
-                    targetX = center.x,
-                    targetY = center.y + 60f,
-                    intensity = flowIntensity
-                )
-            }
-        }
-    }
-}
+                                    setOnPreparedListener { mp ->
+                                        if (mp.videoWidth > 0 && mp.videoHeight > 0) {
+                                            adjustAspectRatio(textureView, mp.videoWidth, mp.videoHeight)
+                                        }
+                                        mp.seekTo(2000)
+                                        mp.start()
+                                    }
+                                    prepareAsync()
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
 
-private fun DrawScope.drawPot(x: Float, y: Float) {
-    val potWidth = 160f
-    val potHeight = 110f
-    val path = Path().apply {
-        moveTo(x - potWidth / 2, y)
-        lineTo(x + potWidth / 2, y)
-        lineTo(x + potWidth / 2 - 20f, y + potHeight)
-        lineTo(x - potWidth / 2 + 20f, y + potHeight)
-        close()
-    }
-    
-    drawPath(
-        path = path,
-        brush = Brush.linearGradient(
-            colors = listOf(Color(0xFF8D6E63), Color(0xFF5D4037)),
-            start = Offset(x, y),
-            end = Offset(x, y + potHeight)
+                        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                            mediaPlayer?.let { mp ->
+                                if (mp.videoWidth > 0 && mp.videoHeight > 0) {
+                                    adjustAspectRatio(textureView, mp.videoWidth, mp.videoHeight)
+                                }
+                            }
+                        }
+
+                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                            try {
+                                mediaPlayer?.stop()
+                                mediaPlayer?.release()
+                            } catch (_: Exception) {}
+                            mediaPlayer = null
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize()
         )
-    )
-    
-    drawRoundRect(
-        color = Color(0xFFA1887F),
-        topLeft = Offset(x - potWidth / 2 - 8f, y - 8f),
-        size = Size(potWidth + 16f, 20f),
-        cornerRadius = CornerRadius(6f)
-    )
-}
-
-private fun DrawScope.drawPlant() {
-    val leafColor = NeonGreen
-    val darkLeafColor = Color(0xFF4CAF50)
-    
-    // Stem
-    drawRect(
-        color = darkLeafColor,
-        topLeft = Offset(-6f, 0f),
-        size = Size(12f, 60f)
-    )
-
-    // Draw multiple leaves
-    drawLeaf(Offset(0f, 15f), -40f, 70f, leafColor)
-    drawLeaf(Offset(0f, 15f), 40f, 70f, leafColor)
-    drawLeaf(Offset(0f, -10f), -60f, 85f, leafColor)
-    drawLeaf(Offset(0f, -10f), 60f, 85f, leafColor)
-    drawLeaf(Offset(0f, -40f), 0f, 100f, leafColor)
-}
-
-private fun DrawScope.drawLeaf(
-    offset: Offset,
-    angle: Float,
-    length: Float,
-    color: Color
-) {
-    withTransform({
-        translate(offset.x, offset.y)
-        rotate(angle, pivot = Offset.Zero)
-    }) {
-        val path = Path().apply {
-            moveTo(0f, 0f)
-            quadraticTo(length / 2, -length / 3, length, 0f)
-            quadraticTo(length / 2, length / 3, 0f, 0f)
-        }
-        drawPath(path, color)
     }
 }
 
-private fun DrawScope.drawWateringCan() {
-    val canColor = Color(0xFF455A64)
-    val lidColor = Color(0xFF263238)
-    
-    // Body
-    drawRoundRect(
-        color = canColor,
-        topLeft = Offset(-50f, 0f),
-        size = Size(100f, 70f),
-        cornerRadius = CornerRadius(16f)
-    )
-    
-    // Top Lid
-    drawRect(
-        color = lidColor,
-        topLeft = Offset(-45f, -5f),
-        size = Size(90f, 10f)
-    )
-    
-    // Spout
-    val spoutPath = Path().apply {
-        moveTo(-50f, 50f)
-        lineTo(-110f, 15f)
-        lineTo(-110f, 0f)
-        lineTo(-50f, 40f)
-        close()
-    }
-    drawPath(spoutPath, canColor)
-    
-    // Handle
-    drawArc(
-        color = lidColor,
-        startAngle = 180f,
-        sweepAngle = 180f,
-        useCenter = false,
-        topLeft = Offset(10f, 10f),
-        size = Size(60f, 50f),
-        style = Stroke(width = 8f, cap = StrokeCap.Round)
-    )
-}
+private fun adjustAspectRatio(textureView: TextureView, videoWidth: Int, videoHeight: Int) {
+    val viewWidth = textureView.width
+    val viewHeight = textureView.height
+    if (viewWidth == 0 || viewHeight == 0 || videoWidth == 0 || videoHeight == 0) return
 
-private fun DrawScope.drawWaterDrops(
-    startX: Float,
-    startY: Float,
-    targetX: Float,
-    targetY: Float,
-    intensity: Float
-) {
-    val dropColor = Color(0xFF81D4FA).copy(alpha = 0.7f)
-    val time = (System.currentTimeMillis() % 1000) / 1000f
-    
-    repeat(12) { i ->
-        val offset = (i / 12f + time) % 1f
-        val x = startX + (targetX - startX) * offset + sin(offset * 10f) * 15f
-        val y = startY + (targetY - startY) * offset
-        
-        val size = 7f * (1f - offset) * intensity
-        if (size > 1f) {
-            drawCircle(
-                color = dropColor,
-                radius = size,
-                center = Offset(x, y)
-            )
-        }
+    val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
+    val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+
+    var scaleX = 1f
+    var scaleY = 1f
+
+    // Center Fit (Contain): Fit entire video inside container without cutting edges
+    if (videoAspect > viewAspect) {
+        scaleY = viewAspect / videoAspect
+    } else {
+        scaleX = videoAspect / viewAspect
     }
+
+    val matrix = Matrix()
+    matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+    textureView.setTransform(matrix)
 }

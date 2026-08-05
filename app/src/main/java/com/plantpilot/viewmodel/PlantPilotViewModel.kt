@@ -424,9 +424,9 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        // Keep animation active for exactly 3 seconds
+        // Keep animation active for exactly 5 seconds
         try {
-            delay(3000L)
+            delay(5000L)
         } finally {
             hardwareRepository.setWateringInProgress(false)
             _isWateringPlantId.value = null
