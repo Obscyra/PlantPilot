@@ -90,5 +90,7 @@ data class AppSettings(
     val maxRuntimeMinutes: Int = 1,
     val sensorCadenceSec: Int = 12,
     val pumpFlowRateMlPerSec: Int = 10,
-    val demoMode: Boolean = false
+    val demoMode: Boolean = false,
+    val lowWaterBuzzCadenceMin: Int = 15,
+    val useHardwareWaterSensor: Boolean = false
 )

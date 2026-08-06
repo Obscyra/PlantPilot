@@ -210,7 +210,9 @@ private fun parseJsonLog(jsonStr: String): Triple<String, String, Color> {
             }
             "status" -> {
                 val cadence = root["sensor_cadence_sec"]?.jsonPrimitive?.content
-                Triple("STATUS", "Hardware Status Received (Cadence: ${cadence ?: "12"}s)", LogInfo)
+                val tankLvl = root["water_level"]?.jsonPrimitive?.content
+                val tankStr = if (tankLvl != null) " • Water Level: Level $tankLvl" else ""
+                Triple("STATUS", "Hardware Status Received (Cadence: ${cadence ?: "12"}s$tankStr)", LogInfo)
             }
             "watering_finished" -> {
                 val motor = root["motor"]?.jsonPrimitive?.content
@@ -262,6 +264,13 @@ private fun formatAppCommand(cmd: String): String {
         cmd == "READ_SENSORS" -> "Read All Soil Sensors"
         cmd == "RESET_CONFIG" -> "Factory Reset Device Config"
         cmd.startsWith("SYNC_MODE") -> "Set Telemetry Rate to ${cmd.removePrefix("SYNC_MODE ").trim()}s"
+        cmd == "BUZZ_TEST" -> "Test Hardware Alarm Buzzer"
+        cmd.startsWith("BUZZ_CADENCE") -> {
+            val mins = cmd.removePrefix("BUZZ_CADENCE ").trim()
+            if (mins == "0") "Disable Alarm Buzzer" else "Set Alarm Cadence to ${mins}m"
+        }
+        cmd == "CAL_STREAM_ON" -> "Start Live Sensor Stream"
+        cmd == "CAL_STREAM_OFF" -> "Stop Live Sensor Stream"
         else -> cmd
     }
 }

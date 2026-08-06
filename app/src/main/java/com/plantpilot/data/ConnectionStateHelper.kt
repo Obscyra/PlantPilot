@@ -38,23 +38,9 @@ object ConnectionStateHelper {
         wateringInProgress: StateFlow<Boolean>? = null,
     ): StateFlow<ConnectionState> {
         val display = MutableStateFlow(real.value)
-        var revealJob: Job? = null
         scope.launch {
             real.collect { state ->
-                revealJob?.cancel()
-                if (state == ConnectionState.Connected) {
-                    if (display.value == ConnectionState.Failed || display.value == ConnectionState.Disconnected) {
-                        revealJob = scope.launch {
-                            display.value = ConnectionState.Reconnecting
-                            delay(1500L) // Visual pulse: show Reconnecting... for 1.5s before Connected
-                            display.value = ConnectionState.Connected
-                        }
-                    } else {
-                        display.value = ConnectionState.Connected
-                    }
-                } else {
-                    display.value = state
-                }
+                display.value = state
             }
         }
         return display.asStateFlow()

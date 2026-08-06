@@ -170,7 +170,137 @@ Relay pumps[4] = {
 MotorSettings motorConfigs[4];
 int soilMoisture[4] = {50, 50, 50, 50};
 int rawSoilCache[4] = {0, 0, 0, 0};
+
+// Buzzer Pin Assignment (GPIO 21)
+#define BUZZER_PIN 21
+
+struct BuzzerState {
+    int remainingBeeps;
+    int beepOnMs;
+    int beepOffMs;
+    unsigned long nextToggleMs;
+    bool isOn;
+};
+BuzzerState buzzer = {0, 0, 0, 0, false};
+
+void initBuzzer() {
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+}
+
+void triggerBuzzer(int beeps, int onMs = 100, int offMs = 100) {
+    if (beeps <= 0) return;
+    buzzer.remainingBeeps = beeps;
+    buzzer.beepOnMs = onMs;
+    buzzer.beepOffMs = offMs;
+    buzzer.isOn = true;
+    buzzer.nextToggleMs = millis() + onMs;
+    digitalWrite(BUZZER_PIN, HIGH);
+}
+
+void updateBuzzer() {
+    if (buzzer.remainingBeeps <= 0) return;
+    unsigned long now = millis();
+    if (now >= buzzer.nextToggleMs) {
+        if (buzzer.isOn) {
+            digitalWrite(BUZZER_PIN, LOW);
+            buzzer.isOn = false;
+            buzzer.remainingBeeps--;
+            if (buzzer.remainingBeeps > 0) {
+                buzzer.nextToggleMs = now + buzzer.beepOffMs;
+            }
+        } else {
+            digitalWrite(BUZZER_PIN, HIGH);
+            buzzer.isOn = true;
+            buzzer.nextToggleMs = now + buzzer.beepOnMs;
+        }
+    }
+}
+#define WL1 16
+#define WL2 17
+#define WL3 18
+#define WL4 19
+
 int waterLevel = 100;
+int waterLevelDiscrete = 4; // 0..4 (0=Empty, 1=25%, 2=50%, 3=75%, 4=100%)
+
+int lowWaterBuzzIntervalMin = 15; // 0 = Disabled, or 5, 15, 30, 60 minutes
+unsigned long lastLowWaterBuzzMs = 0;
+
+void checkLowWaterBuzzer() {
+    if (lowWaterBuzzIntervalMin <= 0) return;
+    if (waterLevelDiscrete <= 1) { // Level 1 (25%) or Level 0 (Empty)
+        unsigned long intervalMs = (unsigned long)lowWaterBuzzIntervalMin * 60000UL;
+        unsigned long nowMs = millis();
+        if (lastLowWaterBuzzMs == 0 || (nowMs - lastLowWaterBuzzMs >= intervalMs)) {
+            lastLowWaterBuzzMs = nowMs;
+            triggerBuzzer(3, 150, 150); // 3 warning beeps
+            Serial.printf("[%s] [ALARM] Low water buzzer warning (Level %d, next in %d min)\n",
+                getLocalTimeStr(), waterLevelDiscrete, lowWaterBuzzIntervalMin);
+        }
+    } else {
+        lastLowWaterBuzzMs = 0; // Reset when tank is refilled
+    }
+}
+
+int readHardwareWaterLevel() {
+    // 3-sample majority voting / debouncing across 15ms to filter electrical noise/jitter
+    int votes[5] = {0}; // Level 0..4 vote counters
+    
+    for (int sample = 0; sample < 3; sample++) {
+        bool L1 = (digitalRead(WL1) == LOW);
+        bool L2 = (digitalRead(WL2) == LOW);
+        bool L3 = (digitalRead(WL3) == LOW);
+        bool L4 = (digitalRead(WL4) == LOW);
+
+        int sampleDiscrete = 0;
+        if (!L1 && !L2 && !L3 && !L4) {
+            sampleDiscrete = 0;
+        } else if (L1 && !L2 && !L3 && !L4) {
+            sampleDiscrete = 1;
+        } else if (L1 && L2 && !L3 && !L4) {
+            sampleDiscrete = 2;
+        } else if (L1 && L2 && L3 && !L4) {
+            sampleDiscrete = 3;
+        } else if (L1 && L2 && L3 && L4) {
+            sampleDiscrete = 4;
+        } else {
+            if (L4) sampleDiscrete = 4;
+            else if (L3) sampleDiscrete = 3;
+            else if (L2) sampleDiscrete = 2;
+            else if (L1) sampleDiscrete = 1;
+            else sampleDiscrete = 0;
+        }
+        votes[sampleDiscrete]++;
+        if (sample < 2) delayMicroseconds(2000); // 2ms between samples
+    }
+
+    // Find the level with the highest votes
+    int winningLevel = waterLevelDiscrete; // Default to current state if tie
+    int maxVotes = 0;
+    for (int i = 0; i <= 4; i++) {
+        if (votes[i] > maxVotes) {
+            maxVotes = votes[i];
+            winningLevel = i;
+        }
+    }
+
+    // Hysteresis: Require 2 consecutive telemetries before dropping from full/mid to empty (Level 0)
+    static int emptyDropCounter = 0;
+    if (winningLevel == 0 && waterLevelDiscrete > 0) {
+        emptyDropCounter++;
+        if (emptyDropCounter < 2) {
+            // Keep previous non-zero level for 1 frame safety buffer
+            winningLevel = waterLevelDiscrete;
+        }
+    } else {
+        emptyDropCounter = 0;
+    }
+
+    waterLevelDiscrete = winningLevel;
+    waterLevel = winningLevel * 25;
+    return winningLevel;
+}
 
 // ADC Calibration Characteristics
 esp_adc_cal_characteristics_t *adc_chars;
@@ -448,10 +578,12 @@ void logIdleStatus() {
 
 void broadcastTelemetry() {
     if (ws.count() == 0) { logIdleStatus(); return; }
+    readHardwareWaterLevel();
     telemetryDoc.clear();
     JsonDocument &doc = telemetryDoc;
     doc["type"] = "telemetry";
     doc["water_level"] = waterLevel;
+    doc["water_level_raw"] = waterLevelDiscrete;
     doc["ntp_synced"] = timeSet;
 
     JsonArray queued = doc["queued"].to<JsonArray>();
@@ -642,6 +774,12 @@ void initRelays() {
         digitalWrite(pumps[i].pin, RELAY_OFF);
         pinMode(pumps[i].sensorPin, INPUT);
     }
+
+    // Configure NPN water level sensor pins (GPIO 16, 17, 18, 19)
+    pinMode(WL1, INPUT_PULLUP);
+    pinMode(WL2, INPUT_PULLUP);
+    pinMode(WL3, INPUT_PULLUP);
+    pinMode(WL4, INPUT_PULLUP);
 }
 
 void initStatusLed() {
@@ -791,6 +929,7 @@ void triggerPump(int index, int amountMl, const char* source = "manual") {
     pumps[index].lastAmountMl = amountMl;
 
     digitalWrite(pumps[index].pin, RELAY_ON);
+    triggerBuzzer(1, 80, 80); // 1 short start beep
     if (durationMs > 0) {
         Serial.printf("[%s] [PUMP] %s ON for %d ml (%d ms) from %s\n", getLocalTimeStr(), pumps[index].name, amountMl, durationMs, pumps[index].lastTriggerSource);
     } else {
@@ -803,6 +942,7 @@ void stopPump(int index) {
 
     pumps[index].isOn = false;
     digitalWrite(pumps[index].pin, RELAY_OFF);
+    triggerBuzzer(2, 80, 80); // 2 short finish beeps
     releaseMotorLock();
     Serial.printf("[%s] [PUMP] %s OFF\n", getLocalTimeStr(), pumps[index].name);
 
@@ -1150,11 +1290,15 @@ void sendOkResponse(AsyncWebSocketClient *client, const String& cmd, bool withPu
 // overflow in the AsyncTCP task and to utilize the larger respBuf.
 void sendStatusResponse() {
     if (ws.count() == 0) return;
+    readHardwareWaterLevel();
     respDoc.clear();
     JsonDocument &doc = respDoc;
     doc["type"] = "status";
     doc["sensor_cadence_sec"] = savedCadenceSec;
     doc["demo_mode"] = demoModeActive;
+    doc["low_water_buzz_cadence_min"] = lowWaterBuzzIntervalMin;
+    doc["water_level"] = waterLevel;
+    doc["water_level_raw"] = waterLevelDiscrete;
     JsonArray pumpsArr = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn || startQueue[i].pending);
     JsonArray motors = doc["motors"].to<JsonArray>();
@@ -1232,6 +1376,23 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         okDoc["type"] = "ok";
         okDoc["cmd"] = "SYNC_MODE";
         okDoc["cadence"] = seconds;
+        serializeJson(okDoc, localBuf, sizeof(localBuf));
+        sendWsRaw(client, localBuf);
+    } else if (cmd == "BUZZ_TEST") {
+        triggerBuzzer(3, 100, 100);
+        Serial.println("[BUZZER] Test beep triggered");
+        sendOkResponse(client, cmd, false);
+    } else if (cmd.startsWith("BUZZ_CADENCE ")) {
+        int minutes = cmd.substring(13).toInt();
+        if (minutes < 0) minutes = 0;
+        if (minutes > 120) minutes = 120;
+        lowWaterBuzzIntervalMin = minutes;
+        Serial.printf("[%s] [BUZZER] Low water alarm cadence set to %d minutes\n", getLocalTimeStr(), minutes);
+        JsonDocument okDoc;
+        char localBuf[256];
+        okDoc["type"] = "ok";
+        okDoc["cmd"] = "BUZZ_CADENCE";
+        okDoc["minutes"] = minutes;
         serializeJson(okDoc, localBuf, sizeof(localBuf));
         sendWsRaw(client, localBuf);
     } else if (cmd == "DEMO_MODE_ON") {
@@ -1586,6 +1747,25 @@ const char* getWifiReasonStr(uint8_t reason) {
 //  SECTION 12: WEBSOCKET EVENT DISPATCHER & COMMAND PARSER
 // =====================================================================================
 
+// Dynamic Wi-Fi Modem Sleep Management
+static unsigned long pendingModemSleepEnableMs = 0;
+static bool isModemSleepActive = false; // Initialized to false so setup triggers initial setDynamicModemSleep(true)
+
+void setDynamicModemSleep(bool enableSleep, const char* reason) {
+    if (enableSleep && !isModemSleepActive) {
+        WiFi.setSleep(WIFI_PS_MIN_MODEM);
+        isModemSleepActive = true;
+        Serial.printf("[%s] [WIFI] Modem Sleep ENABLED (%s) — Power saving mode (~30mA)\n", 
+            getLocalTimeStr(), reason);
+    } else if (!enableSleep && isModemSleepActive) {
+        WiFi.setSleep(false);
+        isModemSleepActive = false;
+        pendingModemSleepEnableMs = 0; // Cancel any pending sleep timer
+        Serial.printf("[%s] [WIFI] Modem Sleep DISABLED (%s) — Performance mode (0ms latency)\n", 
+            getLocalTimeStr(), reason);
+    }
+}
+
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_CONNECTED:
@@ -1599,8 +1779,8 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
                 WiFi.gatewayIP().toString().c_str(),
                 (int)WiFi.RSSI());
             wasConnected = true;
-            // Enable modem sleep between telemetry bursts to reduce thermal load and power consumption
-            WiFi.setSleep(WIFI_PS_MIN_MODEM);
+            // Boot up in standby modem sleep mode (power saving ~30mA) until app connects
+            setDynamicModemSleep(true, "WiFi GOT_IP Standby");
             if (pendingRestart) { restartTime = millis() + 10000; }
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -1648,7 +1828,7 @@ void setup() {
     Serial.printf("[SYSTEM] Initial Free Heap : %u bytes (Min: %u bytes)\n",
         ESP.getFreeHeap(), ESP.getMinFreeHeap());
     Serial.println("=============================================\n");
-    initStatusLed(); initButton(); initRelays(); loadConfigs(); initChannelPolling();
+    initStatusLed(); initButton(); initRelays(); initBuzzer(); loadConfigs(); initChannelPolling();
 
     loadHistoryFromNVS();
 
@@ -1663,7 +1843,7 @@ void setup() {
     }
 
     WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
-    WiFi.setSleep(WIFI_PS_MIN_MODEM);
+    setDynamicModemSleep(true, "Setup Standby");
     preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
     if (ssid.length() > 0) { Serial.printf("[%s] [WIFI] Target: %s\n", getLocalTimeStr(), ssid.c_str()); WiFi.begin(ssid.c_str(), pass.c_str()); }
     else { Serial.printf("[%s] [WIFI] No credentials. Setup Mode.\n", getLocalTimeStr()); startSetupMode(); }
@@ -1673,6 +1853,10 @@ void setup() {
         if (type == WS_EVT_CONNECT) {
             Serial.printf("[%s] [WS] Client connected (ip: %s, total: %u, heap: %u)\n",
                 getLocalTimeStr(), client->remoteIP().toString().c_str(), ws.count(), ESP.getFreeHeap());
+            
+            // Instantly disable modem sleep for 0ms sub-millisecond socket performance
+            setDynamicModemSleep(false, "App client connected");
+
             client->text("PlantPilot Ready");
             Serial.println("[WS] TX: PlantPilot Ready");
             // New client always gets telemetry, regardless of pause state.
@@ -1690,6 +1874,9 @@ void setup() {
                 getLocalTimeStr(), ws.count());
             // If all clients disconnected and any pump has stopOnDisconnect, queue a stop
             if (ws.count() == 0) {
+                // Schedule modem sleep to re-enable after a 5-second grace period
+                pendingModemSleepEnableMs = millis() + 5000UL;
+
                 for (int i = 0; i < 4; i++) {
                     if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
                         Serial.printf("[%s] [PUMP] Stopping %s on disconnect (stopOnDisconnect=true)\n",
@@ -1718,6 +1905,17 @@ void loop() {
     unsigned long loopStart = millis();
     updateStatusLed();
     updateButton();
+    updateBuzzer();
+    checkLowWaterBuzzer();
+
+    // Dynamic Wi-Fi Modem Sleep Grace Timer:
+    // When all WebSocket clients disconnect, wait 5 seconds before returning to power-saving modem sleep.
+    if (pendingModemSleepEnableMs > 0 && loopStart >= pendingModemSleepEnableMs) {
+        pendingModemSleepEnableMs = 0;
+        if (ws.count() == 0) {
+            setDynamicModemSleep(true, "App closed / no active clients");
+        }
+    }
 
     // 1. Process Global Start Queue (Power Safety - Non-blocking)
     // Sequential Scheduling: Only trigger a queued pump if no other motor is running.

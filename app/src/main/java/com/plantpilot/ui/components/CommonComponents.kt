@@ -83,30 +83,31 @@ fun ConnectionStatusChip(
         }
     }
 
-    // Smooth background & text/icon color transitions
+    // Smooth background & text/icon color transitions (smooth tween easing)
     val animatedContainerColor by animateColorAsState(
         targetValue = targetContainerColor,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        animationSpec = tween(durationMillis = 350, easing = FastOutSlowInEasing),
         label = "chip_container_color"
     )
     val animatedContentColor by animateColorAsState(
         targetValue = targetContentColor,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        animationSpec = tween(durationMillis = 350, easing = FastOutSlowInEasing),
         label = "chip_content_color"
     )
 
     Surface(
+        onClick = onClick,
         shape = RoundedCornerShape(12.dp),
         color = animatedContainerColor,
-        modifier = modifier
-            .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
-            .bounceClick(onClick = onClick)
+        modifier = modifier.animateContentSize(
+            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)
+        )
     ) {
         AnimatedContent(
             targetState = Triple(connectionState, isSyncing, isConfigDirty),
             transitionSpec = {
-                (fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { height -> height / 2 })
-                    .togetherWith(fadeOut(animationSpec = tween(200)) + slideOutVertically(animationSpec = tween(200)) { height -> -height / 2 })
+                (slideInHorizontally(animationSpec = tween(350, easing = FastOutSlowInEasing)) { width -> width / 3 } + fadeIn(animationSpec = tween(350)))
+                    .togetherWith(slideOutHorizontally(animationSpec = tween(250, easing = FastOutSlowInEasing)) { width -> -width / 3 } + fadeOut(animationSpec = tween(250)))
             },
             label = "connection_chip_content"
         ) { _ ->

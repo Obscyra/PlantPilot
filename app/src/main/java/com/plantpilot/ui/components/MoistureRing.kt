@@ -31,7 +31,7 @@ fun MoistureRing(
         else -> MaterialTheme.colorScheme.error
     }
 
-    val color by animateColorAsState(
+    val colorState = animateColorAsState(
         targetValue = targetColor,
         animationSpec = tween(durationMillis = 1000),
         label = "ring_color"
@@ -70,7 +70,7 @@ fun MoistureRing(
             )
 
             drawArc(
-                color = color,
+                color = colorState.value,
                 startAngle = -90f,
                 sweepAngle = 360f * animatedProgress.value,
                 useCenter = false,

@@ -19,4 +19,19 @@ object TimeUtils {
         val sdf = SimpleDateFormat(pattern, Locale.getDefault())
         return sdf.format(Date(timestamp))
     }
+
+    fun getRelativeTimeString(timestamp: Long): String {
+        if (timestamp <= 0) return "Never"
+        val diffMs = System.currentTimeMillis() - timestamp
+        if (diffMs < 0) return "Recently"
+        val diffMin = diffMs / (60 * 1000)
+        val diffHour = diffMin / 60
+        val diffDay = diffHour / 24
+        return when {
+            diffMin < 1 -> "Just now"
+            diffMin < 60 -> "${diffMin}m ago"
+            diffHour < 24 -> "${diffHour}h ago"
+            else -> "${diffDay}d ago"
+        }
+    }
 }

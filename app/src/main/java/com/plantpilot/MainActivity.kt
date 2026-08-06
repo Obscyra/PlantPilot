@@ -53,6 +53,25 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = false
         }
 
+        // Request max refresh rate mode (90Hz / 120Hz / 144Hz) for smooth display scrolling on Android 14, 15 & 16
+        try {
+            val displayObj = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                window.windowManager.defaultDisplay
+            }
+            val modes = displayObj?.supportedModes
+            val maxMode = modes?.maxByOrNull { it.refreshRate }
+            if (maxMode != null) {
+                val lp = window.attributes
+                lp.preferredDisplayModeId = maxMode.modeId
+                window.attributes = lp
+            }
+        } catch (_: Exception) {
+            // Safe fallback for custom ROMs / legacy vendor drivers
+        }
+
         // The background sync service posts a notification on Android 13+;
         // request that permission once so the notification is actually visible.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

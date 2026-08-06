@@ -48,21 +48,25 @@ class SyncCoordinator(
     private val _isConfigDirty = MutableStateFlow(false)
     val isConfigDirty: StateFlow<Boolean> = _isConfigDirty.asStateFlow()
 
-    fun markConfigDirty(autoSync: Boolean = false) {
-        _isConfigDirty.value = true
-        // Only auto-sync when actually connected; otherwise edits are persisted
-        // locally and synced on the next connection.
+    private var autoSyncJob: kotlinx.coroutines.Job? = null
+
+    fun markConfigDirty(autoSync: Boolean = true) {
+        autoSyncJob?.cancel()
         if (autoSync && canSendCommands()) {
-            scope.launch {
+            autoSyncJob = scope.launch {
+                delay(500.milliseconds)
+                _isConfigDirty.value = true
                 syncConfigWithDevice()
             }
+        } else {
+            _isConfigDirty.value = true
         }
     }
 
     suspend fun syncConfigWithDevice(silent: Boolean = false, force: Boolean = false) {
         if (_isSyncing.value || (!_isConfigDirty.value && !force)) return
         val startTime = System.currentTimeMillis()
-        if (!silent) _isSyncing.value = true
+        _isSyncing.value = true
 
         val motorConfigs = plants.value.map { plant ->
             MotorConfig(
@@ -101,14 +105,17 @@ class SyncCoordinator(
             result.getOrNull()?.history?.forEach { devEvent ->
                 historyManager.processOfflineEvent(devEvent)
             }
+        } else {
+            _isConfigDirty.value = true
         }
 
-        if (!silent) {
-            val elapsed = System.currentTimeMillis() - startTime
-            val remaining = (2000L - elapsed).coerceAtLeast(0)
+        // Guarantee that "Updating..." chip is visible for at least 500ms
+        val elapsed = System.currentTimeMillis() - startTime
+        val remaining = (500L - elapsed).coerceAtLeast(0)
+        if (remaining > 0) {
             delay(remaining.milliseconds)
-            _isSyncing.value = false
         }
+        _isSyncing.value = false
     }
 
     /**

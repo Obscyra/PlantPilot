@@ -183,11 +183,17 @@ class HardwareRepository : HardwareConnection {
             webSocket?.cancel()
             webSocket = null
         } catch (_: Exception) {}
-        if (!hasConnectedOnce) {
-            _connectionState.value = ConnectionState.Connecting
-        } else if (_connectionState.value != ConnectionState.Connected) {
-            _connectionState.value = ConnectionState.Reconnecting
+
+        // Maintain steady ConnectionState.Failed ("Offline") during background backoff retries (consecutiveFailures > 0)
+        // to prevent UI flickering between Offline and Reconnecting.
+        if (consecutiveFailures == 0) {
+            if (!hasConnectedOnce) {
+                _connectionState.value = ConnectionState.Connecting
+            } else if (_connectionState.value != ConnectionState.Connected) {
+                _connectionState.value = ConnectionState.Reconnecting
+            }
         }
+
         val request = Request.Builder().url(url).build()
         var currentSocket: WebSocket? = null
         val socket = client.newWebSocket(request, object : WebSocketListener() {

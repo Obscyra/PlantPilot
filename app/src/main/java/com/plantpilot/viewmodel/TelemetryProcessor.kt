@@ -39,16 +39,26 @@ class TelemetryProcessor(
     private val SNAPSHOT_SAVE_INTERVAL_MS = 2000L
 
     fun applyTelemetry(status: DeviceStatusResponse) {
-        // The firmware currently hardcodes water_level=100 and never decrements
-        // it, so it can't drive the displayed tank level. Until a real tank
-        // sensor is wired, derive the discrete level from the app-tracked
-        // estimate (estimatedWaterMl).
         val capacity = deviceStateFlow.value.tankCapacityMl
-        val tankLevel = mlToLevel(deviceStateFlow.value.estimatedWaterMl, capacity)
-        
+        val currentEstimatedMl = deviceStateFlow.value.estimatedWaterMl
+        val isDemo = settings.value.demoMode
+        val hardwareDiscrete = if (settings.value.useHardwareWaterSensor) {
+            status.water_level_raw ?: (if (status.water_level >= 0) status.water_level / 25 else null)
+        } else {
+            null // Completely ignore unattached hardware NPN sensor pin noise!
+        }
+
+        val (tankLevel, reconciledMl) = calculateWaterTankState(
+            hardwareLevelDiscrete = hardwareDiscrete,
+            currentEstimatedMl = currentEstimatedMl,
+            capacityMl = capacity,
+            isDemoMode = isDemo
+        )
+
         deviceStateFlow.update { current ->
             current.copy(
                 waterTankLevel = tankLevel,
+                estimatedWaterMl = reconciledMl,
                 wifiSsid = status.wifi_ssid ?: current.wifiSsid,
                 queuedPumps = status.queued ?: listOf(false, false, false, false)
             )
@@ -98,6 +108,68 @@ class TelemetryProcessor(
             lastSnapshotSavedAt = nowMs
             scope.launch { settingsManager.saveTelemetrySnapshot(status) }
         }
+    }
+
+    private var zeroReadBufferCount = 0
+
+    private fun calculateWaterTankState(
+        hardwareLevelDiscrete: Int?,
+        currentEstimatedMl: Int,
+        capacityMl: Int,
+        isDemoMode: Boolean
+    ): Pair<Int, Int> {
+        if (hardwareLevelDiscrete == null) {
+            val level = mlToLevel(currentEstimatedMl, capacityMl)
+            return Pair(level, currentEstimatedMl)
+        }
+
+        if (isDemoMode) {
+            // Demo Mode Direct Hardware Sensor Override:
+            // Bypasses volume history calculations and displays hardware sensor level directly!
+            val demoLevel = hardwareLevelDiscrete.coerceIn(0, 4)
+            val demoMl = (capacityMl * (demoLevel * 0.25f)).toInt()
+            return Pair(demoLevel, demoMl)
+        }
+
+        // Normal Production Mode (Hybrid Model):
+        val rawDiscrete = hardwareLevelDiscrete.coerceIn(0, 4)
+        
+        // Debounce transient zero reads (transient pin noise / probe float jitter)
+        val discrete = if (rawDiscrete == 0 && currentEstimatedMl > 0) {
+            zeroReadBufferCount++
+            if (zeroReadBufferCount < 3) {
+                mlToLevel(currentEstimatedMl, capacityMl)
+            } else {
+                0
+            }
+        } else {
+            zeroReadBufferCount = 0
+            rawDiscrete
+        }
+
+        if (discrete == 0) {
+            return Pair(0, 0)
+        }
+
+        val (minFraction, maxFraction) = when (discrete) {
+            4 -> Pair(0.75f, 1.00f) // Level 4 (Full): 75% to 100%
+            3 -> Pair(0.50f, 0.75f) // Level 3: 50% to 75%
+            2 -> Pair(0.25f, 0.50f) // Level 2: 25% to 50%
+            1 -> Pair(0.05f, 0.25f) // Level 1: 5% to 25%
+            else -> Pair(0.00f, 0.00f)
+        }
+
+        val minAllowedMl = (capacityMl * minFraction).toInt()
+        val maxAllowedMl = (capacityMl * maxFraction).toInt()
+
+        // If tracked volume is outside boundary, re-anchor it to the hardware sensor level boundary
+        val reconciledMl = if (currentEstimatedMl < minAllowedMl || currentEstimatedMl > maxAllowedMl) {
+            maxAllowedMl
+        } else {
+            currentEstimatedMl
+        }
+
+        return Pair(discrete, reconciledMl)
     }
 
     private fun mlToLevel(ml: Int, capacity: Int): Int {

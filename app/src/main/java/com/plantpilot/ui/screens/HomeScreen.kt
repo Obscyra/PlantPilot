@@ -90,6 +90,7 @@ fun HomeScreen(
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = MaterialTheme.shapes.extraLarge,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, com.plantpilot.ui.theme.CardGlassBorderMuted),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                         ),
@@ -97,7 +98,7 @@ fun HomeScreen(
                         WaterTankIndicator(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(all = 24.dp),
+                                .padding(all = 16.dp),
                             tankCapacityMl = deviceState.tankCapacityMl,
                             estimatedWaterMl = deviceState.estimatedWaterMl,
                         )
@@ -137,8 +138,7 @@ fun HomeScreen(
                                     }
                                 }
                             },
-                            onClick = { onPlantClick(plant.id) },
-                            modifier = Modifier.animateItem()
+                            onClick = { onPlantClick(plant.id) }
                         )
                     }
                 }

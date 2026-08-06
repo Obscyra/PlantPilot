@@ -39,9 +39,16 @@ val OnErrorDark = Color(0xFF3B0000)
 val ErrorContainerDark = Color(0xFF3B0000)
 val OnErrorContainerDark = Color(0xFFFFB4AB)
 
-// Outline
+// Outline & Glassmorphic borders
 val OutlineDark = Color(0xFF5A5A56)
-val OutlineVariantDark = Color(0xFF3A3A36)
+val OutlineVariantDark = Color(0xFF282C28)
+val CardGlassBorder = Color(0x33B6FF3C)
+val CardGlassBorderMuted = Color(0x1F2B362A)
+
+// Plant Status Accent Colors
+val StatusOptimal = Color(0xFF66BB6A)
+val StatusWarning = Color(0xFFFFA726)
+val StatusWatering = Color(0xFF29B6F6)
 
 // Inverse
 val InverseSurfaceDark = Color(0xFFE3E3DC)

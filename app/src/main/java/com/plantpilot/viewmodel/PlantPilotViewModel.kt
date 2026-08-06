@@ -243,6 +243,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 if (state == ConnectionState.Connected) {
                     val isDemo = _settings.value.demoMode
                     hardwareRepository.sendCommand(if (isDemo) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
+                    hardwareRepository.sendCommand("BUZZ_CADENCE ${_settings.value.lowWaterBuzzCadenceMin}")
                 }
             }
         }
@@ -529,6 +530,53 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         if (hardwareRepository.connectionState.value == ConnectionState.Connected) {
             hardwareRepository.sendCommand(if (enabled) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
         }
+    }
+
+    fun testBuzzer() {
+        if (!canSendCommands) {
+            _commandBlockedEvents.trySend("Can't test buzzer — device offline")
+            return
+        }
+        hardwareRepository.sendCommand("BUZZ_TEST")
+        hardwareRepository.logUserAction("Settings: Triggered Buzzer test")
+    }
+
+    fun updateLowWaterBuzzCadence(minutes: Int) {
+        updateSettings { it.copy(lowWaterBuzzCadenceMin = minutes) }
+        hardwareRepository.logUserAction("Settings: Low water buzzer cadence → ${minutes} min")
+        if (hardwareRepository.connectionState.value == ConnectionState.Connected) {
+            hardwareRepository.sendCommand("BUZZ_CADENCE $minutes")
+        }
+    }
+
+    fun updateTankCapacity(capacityMl: Int) {
+        val validCapacity = capacityMl.coerceAtLeast(100)
+        updateDeviceState { s ->
+            val newEstimated = s.estimatedWaterMl.coerceAtMost(validCapacity)
+            s.copy(
+                tankCapacityMl = validCapacity,
+                estimatedWaterMl = if (s.estimatedWaterMl > validCapacity || s.estimatedWaterMl == s.tankCapacityMl) validCapacity else newEstimated
+            )
+        }
+        hardwareRepository.logUserAction("Settings: Tank capacity updated → ${validCapacity} ml")
+    }
+
+    fun setUseHardwareWaterSensor(enabled: Boolean) {
+        updateSettings { it.copy(useHardwareWaterSensor = enabled) }
+        hardwareRepository.logUserAction("Settings: Hardware Water Sensor → ${if (enabled) "ON" else "OFF (Pure Software History)"}")
+    }
+
+    fun setEstimatedWaterMl(ml: Int) {
+        val capacity = _deviceState.value.tankCapacityMl
+        val clamped = ml.coerceIn(0, capacity)
+        updateDeviceState { it.copy(estimatedWaterMl = clamped) }
+        hardwareRepository.logUserAction("Settings: Manually set estimated water → ${clamped} ml")
+    }
+
+    fun refillTankToFull() {
+        val capacity = _deviceState.value.tankCapacityMl
+        updateDeviceState { it.copy(estimatedWaterMl = capacity) }
+        hardwareRepository.logUserAction("Settings: Refilled water tank to 100% (${capacity} ml)")
     }
 
     fun updatePumpFlowRate(mlPerSec: Int) {

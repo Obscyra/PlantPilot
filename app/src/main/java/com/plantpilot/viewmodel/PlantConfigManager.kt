@@ -19,7 +19,7 @@ class PlantConfigManager(
     private val settingsManager: SettingsManager,
     private val markConfigDirty: (autoSync: Boolean) -> Unit,
 ) {
-    fun updatePlant(plantId: String, autoSync: Boolean = false, update: (Plant) -> Plant) {
+    fun updatePlant(plantId: String, autoSync: Boolean = true, update: (Plant) -> Plant) {
         plantsFlow.update { currentList ->
             currentList.map {
                 if (it.id == plantId) {

@@ -1,6 +1,9 @@
 package com.plantpilot.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -231,40 +234,155 @@ fun HardwareSettingsScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    val capacityMl = deviceState.tankCapacityMl
+                    val level1Ml = (capacityMl * 0.25f).toInt()
+                    val level2Ml = (capacityMl * 0.50f).toInt()
+
                     Text(
-                        text = "Low Water Level Alert",
+                        text = "Low Water Level Alert Threshold",
                         style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Trigger low water notification when tank drops to this level (level 1 or 2)",
+                        text = "Trigger low water warning when tank drops to Level 1 (${level1Ml} ml) or Level 2 (${level2Ml} ml)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        text = "Level ${deviceState.lowWaterThreshold.coerceIn(1, 2)}",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    var editableThreshold by remember(deviceState.lowWaterThreshold) {
-                        mutableFloatStateOf(deviceState.lowWaterThreshold.toFloat().coerceIn(1f, 2f))
-                    }
-                    Slider(
-                        value = editableThreshold,
-                        onValueChange = { editableThreshold = it },
-                        onValueChangeFinished = {
-                            viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = editableThreshold.toInt()) }
-                        },
-                        valueRange = 1f..2f,
-                        steps = 0,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    
+                    val currentThreshold = deviceState.lowWaterThreshold.coerceIn(1, 2)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text("Level 1 (Default)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (currentThreshold == 1) {
+                            Button(
+                                onClick = { },
+                                modifier = Modifier.weight(1f),
+                                shape = MaterialTheme.shapes.medium
+                            ) {
+                                Text("Level 1 (${level1Ml} ml)")
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = 1) }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = MaterialTheme.shapes.medium
+                            ) {
+                                Text("Level 1 (${level1Ml} ml)")
+                            }
+                        }
+
+                        if (currentThreshold == 2) {
+                            Button(
+                                onClick = { },
+                                modifier = Modifier.weight(1f),
+                                shape = MaterialTheme.shapes.medium
+                            ) {
+                                Text("Level 2 (${level2Ml} ml)")
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.updateDeviceState { s -> s.copy(lowWaterThreshold = 2) }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = MaterialTheme.shapes.medium
+                            ) {
+                                Text("Level 2 (${level2Ml} ml)")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Hardware Water Level Sensor Card
+            Text(
+                text = "Water Tank Sensor",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Hardware Water Level Sensor",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (settings.useHardwareWaterSensor) "Enabled — Tank level driven by 4-stage NPN hardware sensor."
+                                       else "Disabled — Software history mode. Manually calibrate or refill tank below.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = settings.useHardwareWaterSensor,
+                            onCheckedChange = { enabled ->
+                                viewModel.setUseHardwareWaterSensor(enabled)
+                            }
+                        )
+                    }
+
+                    AnimatedVisibility(visible = !settings.useHardwareWaterSensor) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                            Text(
+                                text = "Manual Tank Volume Calibration",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                var manualWaterText by remember(deviceState.estimatedWaterMl) {
+                                    mutableStateOf(deviceState.estimatedWaterMl.toString())
+                                }
+                                OutlinedTextField(
+                                    value = manualWaterText,
+                                    onValueChange = { newValue ->
+                                        manualWaterText = newValue
+                                        newValue.toIntOrNull()?.let { ml ->
+                                            viewModel.setEstimatedWaterMl(ml)
+                                        }
+                                    },
+                                    label = { Text("Current Water (ml)") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = { viewModel.refillTankToFull() },
+                                    shape = MaterialTheme.shapes.medium
+                                ) {
+                                    Text("Refill 100%")
+                                }
+                            }
+                        }
                     }
                 }
             }

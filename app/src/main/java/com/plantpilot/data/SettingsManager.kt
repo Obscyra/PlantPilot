@@ -41,6 +41,8 @@ class SettingsManager(private val context: Context) {
         val PUMP_FLOW_RATE: Preferences.Key<Int> = intPreferencesKey("pump_flow_rate_ml_per_sec")
         val PLANTS_MIGRATED_V2: Preferences.Key<Boolean> = booleanPreferencesKey("plants_migrated_v2")
         val DEMO_MODE: Preferences.Key<Boolean> = booleanPreferencesKey("demo_mode")
+        val LOW_WATER_BUZZ_CADENCE: Preferences.Key<Int> = intPreferencesKey("low_water_buzz_cadence_min")
+        val USE_HARDWARE_WATER_SENSOR: Preferences.Key<Boolean> = booleanPreferencesKey("use_hardware_water_sensor")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -64,7 +66,9 @@ class SettingsManager(private val context: Context) {
             maxRuntimeMinutes = prefs[MAX_RUNTIME] ?: 1,
             sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 12,
             pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10,
-            demoMode = prefs[DEMO_MODE] ?: false
+            demoMode = prefs[DEMO_MODE] ?: false,
+            lowWaterBuzzCadenceMin = prefs[LOW_WATER_BUZZ_CADENCE] ?: 15,
+            useHardwareWaterSensor = prefs[USE_HARDWARE_WATER_SENSOR] ?: false
         )
     }
 
@@ -129,6 +133,8 @@ class SettingsManager(private val context: Context) {
             prefs[SENSOR_CADENCE] = settings.sensorCadenceSec
             prefs[PUMP_FLOW_RATE] = settings.pumpFlowRateMlPerSec
             prefs[DEMO_MODE] = settings.demoMode
+            prefs[LOW_WATER_BUZZ_CADENCE] = settings.lowWaterBuzzCadenceMin
+            prefs[USE_HARDWARE_WATER_SENSOR] = settings.useHardwareWaterSensor
         }
     }
 
