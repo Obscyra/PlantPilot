@@ -17,11 +17,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.ui.unit.dp
 
 import com.plantpilot.data.ConnectionState
 import com.plantpilot.util.bounceClick
 import com.plantpilot.viewmodel.PlantPilotViewModel
+
+import androidx.compose.material.icons.filled.Warning
 
 @Composable
 fun ConnectionStatusChip(
@@ -33,8 +37,8 @@ fun ConnectionStatusChip(
 ) {
     val label: String
     val icon: ImageVector?
-    val containerColor: Color
-    val contentColor: Color
+    val targetContainerColor: Color
+    val targetContentColor: Color
     var showSpinner = false
     when (connectionState) {
         is ConnectionState.Connected -> {
@@ -42,73 +46,96 @@ fun ConnectionStatusChip(
                 label = "Updating..."
                 icon = null
                 showSpinner = true
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                targetContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                targetContentColor = MaterialTheme.colorScheme.onSurfaceVariant
             } else {
                 label = if (isConfigDirty) "Update" else "Connected"
                 icon = if (isConfigDirty) Icons.Default.CloudUpload else Icons.Default.Wifi
-                containerColor = MaterialTheme.colorScheme.primaryContainer
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                targetContainerColor = MaterialTheme.colorScheme.primaryContainer
+                targetContentColor = MaterialTheme.colorScheme.onPrimaryContainer
             }
         }
         is ConnectionState.Connecting -> {
             label = "Connecting..."
             icon = null
             showSpinner = true
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+            targetContainerColor = MaterialTheme.colorScheme.surfaceVariant
+            targetContentColor = MaterialTheme.colorScheme.onSurfaceVariant
         }
         is ConnectionState.Reconnecting -> {
             label = "Reconnecting..."
             icon = null
             showSpinner = true
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-            contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+            targetContainerColor = MaterialTheme.colorScheme.tertiaryContainer
+            targetContentColor = MaterialTheme.colorScheme.onTertiaryContainer
         }
         is ConnectionState.Failed -> {
             label = "Offline"
             icon = Icons.Default.WifiOff
-            containerColor = MaterialTheme.colorScheme.errorContainer
-            contentColor = MaterialTheme.colorScheme.onErrorContainer
+            targetContainerColor = MaterialTheme.colorScheme.errorContainer
+            targetContentColor = MaterialTheme.colorScheme.onErrorContainer
         }
         is ConnectionState.Disconnected -> {
             label = "Disconnected"
             icon = Icons.Default.WifiOff
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+            targetContainerColor = MaterialTheme.colorScheme.surfaceVariant
+            targetContentColor = MaterialTheme.colorScheme.onSurfaceVariant
         }
     }
 
+    // Smooth background & text/icon color transitions
+    val animatedContainerColor by animateColorAsState(
+        targetValue = targetContainerColor,
+        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        label = "chip_container_color"
+    )
+    val animatedContentColor by animateColorAsState(
+        targetValue = targetContentColor,
+        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        label = "chip_content_color"
+    )
+
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = containerColor,
-        modifier = modifier.bounceClick(onClick = onClick)
+        color = animatedContainerColor,
+        modifier = modifier
+            .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+            .bounceClick(onClick = onClick)
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (showSpinner) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = contentColor
-                )
-            } else {
-                Icon(
-                    imageVector = icon!!,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = contentColor
+        AnimatedContent(
+            targetState = Triple(connectionState, isSyncing, isConfigDirty),
+            transitionSpec = {
+                (fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { height -> height / 2 })
+                    .togetherWith(fadeOut(animationSpec = tween(200)) + slideOutVertically(animationSpec = tween(200)) { height -> -height / 2 })
+            },
+            label = "connection_chip_content"
+        ) { _ ->
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (showSpinner) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = animatedContentColor
+                    )
+                } else if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = animatedContentColor
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = animatedContentColor
                 )
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = contentColor
-            )
         }
     }
 }
@@ -134,6 +161,63 @@ fun ConnectionStatusChip(
 }
 
 @Composable
+fun DemoModeBanner(
+    onTurnOff: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "Demo Mode Active",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Cooldown is bypassed while connected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
+                    )
+                }
+            }
+            TextButton(
+                onClick = onTurnOff,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.tertiary
+                )
+            ) {
+                Text(
+                    text = "Turn Off",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun DeviceConnectionDialog(
     connectionState: ConnectionState,
     deviceIp: String,
@@ -155,42 +239,59 @@ fun DeviceConnectionDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when {
-                        isConnecting || isReconnecting -> CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
-                        )
-                        isConnected -> Icon(
-                            Icons.Default.Wifi,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        else -> Icon(
-                            Icons.Default.WifiOff,
-                            contentDescription = null,
-                            tint = if (isFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+            AnimatedContent(
+                targetState = connectionState to deviceIp,
+                transitionSpec = {
+                    (fadeIn(tween(300)) + slideInVertically { it / 3 })
+                        .togetherWith(fadeOut(tween(200)) + slideOutVertically { -it / 3 })
+                },
+                label = "dialog_connection_state"
+            ) { (state, ip) ->
+                val stateIsConnected = state == ConnectionState.Connected
+                val stateIsConnecting = state == ConnectionState.Connecting
+                val stateIsReconnecting = state == ConnectionState.Reconnecting
+                val stateIsFailed = state == ConnectionState.Failed
+
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.animateContentSize()
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        when {
+                            stateIsConnecting || stateIsReconnecting -> CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                            stateIsConnected -> Icon(
+                                Icons.Default.Wifi,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            else -> Icon(
+                                Icons.Default.WifiOff,
+                                contentDescription = null,
+                                tint = if (stateIsFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            when {
+                                stateIsConnecting -> "Connecting to PilotCore..."
+                                stateIsReconnecting -> "Reconnecting to PilotCore..."
+                                stateIsConnected -> "Connected to PilotCore"
+                                stateIsFailed -> "Connection failed — device unreachable"
+                                else -> "Not connected to PilotCore"
+                            },
+                            style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        when {
-                            isConnecting -> "Connecting to PilotCore..."
-                            isReconnecting -> "Reconnecting to PilotCore..."
-                            isConnected -> "Connected to PilotCore"
-                            isFailed -> "Connection failed — device unreachable"
-                            else -> "Not connected to PilotCore"
-                        },
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                if (deviceIp.isNotBlank()) {
-                    Text(
-                        "Device IP: $deviceIp",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (ip.isNotBlank()) {
+                        Text(
+                            "Device IP: $ip",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         },

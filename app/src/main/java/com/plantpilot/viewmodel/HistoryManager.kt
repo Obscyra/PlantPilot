@@ -27,7 +27,12 @@ class HistoryManager(
     private val onWaterUsed: (amountMl: Int) -> Unit = {},
 ) {
     fun addHistoryEvent(event: WateringEvent) {
-        historyFlow.update { current -> (listOf(event) + current).take(50) }
+        historyFlow.update { current ->
+            (listOf(event) + current)
+                .distinctBy { "${it.motorNumber}_${it.timestamp}" }
+                .sortedByDescending { it.timestamp }
+                .take(50)
+        }
         
         scope.launch {
             settingsManager.saveHistory(historyFlow.value)

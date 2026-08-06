@@ -89,5 +89,6 @@ data class AppSettings(
     val use24HourFormat: Boolean,
     val maxRuntimeMinutes: Int = 1,
     val sensorCadenceSec: Int = 12,
-    val pumpFlowRateMlPerSec: Int = 10
+    val pumpFlowRateMlPerSec: Int = 10,
+    val demoMode: Boolean = false
 )

@@ -7,7 +7,7 @@ object MockData {
     fun generatePlants(): List<Plant> = listOf(
         Plant(
             id = "plant_1",
-            name = "Monstera Deliciosa",
+            name = "Money Plant",
             motorNumber = 1,
             wateringMode = WateringMode.OFF,
             waterAmountMl = 50,
@@ -22,7 +22,7 @@ object MockData {
         ),
         Plant(
             id = "plant_2",
-            name = "Snake Plant",
+            name = "Rose",
             motorNumber = 2,
             wateringMode = WateringMode.OFF,
             waterAmountMl = 50,
@@ -37,7 +37,7 @@ object MockData {
         ),
         Plant(
             id = "plant_3",
-            name = "Fiddle Leaf Fig",
+            name = "Aloe Vera",
             motorNumber = 3,
             wateringMode = WateringMode.OFF,
             waterAmountMl = 50,
@@ -52,7 +52,7 @@ object MockData {
         ),
         Plant(
             id = "plant_4",
-            name = "Spider Plant",
+            name = "Snake Plant",
             motorNumber = 4,
             wateringMode = WateringMode.OFF,
             waterAmountMl = 50,

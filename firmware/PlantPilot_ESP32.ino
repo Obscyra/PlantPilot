@@ -360,6 +360,7 @@ void releaseMotorLock() {
 // its mode whenever it (re)connects.
 volatile unsigned long streamCadenceMs = 3000UL;
 int savedCadenceSec = 3;
+bool demoModeActive = false;
 
 // Last time the heavy per-motor config array was included in a telemetry frame
 // (signature of versions/timestamps). Reset to 0 on boot and whenever a WS
@@ -370,6 +371,22 @@ Preferences preferences;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 DNSServer dnsServer;
+
+void saveHistoryToNVS() {
+    preferences.begin("history", false);
+    preferences.putBytes("buf", wateringHistory, sizeof(wateringHistory));
+    preferences.putInt("writeIdx", historyWriteIdx);
+    preferences.end();
+}
+
+void loadHistoryFromNVS() {
+    preferences.begin("history", true);
+    if (preferences.isKey("buf")) {
+        preferences.getBytes("buf", wateringHistory, sizeof(wateringHistory));
+        historyWriteIdx = preferences.getInt("writeIdx", 0) % 10;
+    }
+    preferences.end();
+}
 
 // --- HELPERS ---
 
@@ -419,16 +436,14 @@ static char telemetryBuf[2048];
 void logIdleStatus() {
     static unsigned long lastIdleLog = 0;
     unsigned long now = millis();
-    // ~1 line per 30s while disconnected.
-    if (now - lastIdleLog < 30000UL) return;
+    // ~1 line per 60s while disconnected.
+    if (now - lastIdleLog < 60000UL) return;
     lastIdleLog = now;
 
-    Serial.printf("[%s] [IDLE] wifi=%d (%d dBm) clients=%u soil=%d,%d,%d,%d pumps=%d,%d,%d,%d water=%d heap=%u uptime=%lus\n",
+    Serial.printf("[%s] [IDLE] WiFi connected (%d dBm), 0 clients (sensors sleeping), heap=%u, uptime=%lus\n",
         getLocalTimeStr(),
-        (int)WiFi.status(), (int)WiFi.RSSI(), ws.count(),
-        soilMoisture[0], soilMoisture[1], soilMoisture[2], soilMoisture[3],
-        pumps[0].isOn, pumps[1].isOn, pumps[2].isOn, pumps[3].isOn,
-        waterLevel, ESP.getFreeHeap(), millis() / 1000);
+        (int)WiFi.RSSI(),
+        ESP.getFreeHeap(), millis() / 1000);
 }
 
 void broadcastTelemetry() {
@@ -805,6 +820,7 @@ void stopPump(int index) {
         wateringHistory[historyWriteIdx].moistureAfter = moistureAfter;
         wateringHistory[historyWriteIdx].isValid = true;
         historyWriteIdx = (historyWriteIdx + 1) % 10;
+        saveHistoryToNVS();
     }
 
     // Notify app of completion only for real timed waterings.
@@ -1002,9 +1018,10 @@ void checkAutoWatering() {
         if (isMotorBusy()) continue;
 
         // Respect the per-plant min auto-water interval.
-        // 10s default safety gap so water diffuses through soil before re-triggering.
+        // In Demo Mode (while app is connected), bypass minIntervalHours for live testing.
+        bool bypassInterval = (isAppConnected && demoModeActive);
         unsigned long minGapMs = 10000UL;
-        if (motorConfigs[i].minIntervalHours > 0) {
+        if (!bypassInterval && motorConfigs[i].minIntervalHours > 0) {
             unsigned long minGapSec = (unsigned long)motorConfigs[i].minIntervalHours * 3600UL;
 
             // 1. Check persistent epoch (survives reboot)
@@ -1137,6 +1154,7 @@ void sendStatusResponse() {
     JsonDocument &doc = respDoc;
     doc["type"] = "status";
     doc["sensor_cadence_sec"] = savedCadenceSec;
+    doc["demo_mode"] = demoModeActive;
     JsonArray pumpsArr = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn || startQueue[i].pending);
     JsonArray motors = doc["motors"].to<JsonArray>();
@@ -1169,6 +1187,10 @@ void sendStatusResponse() {
 }
 
 void sendWsRaw(AsyncWebSocketClient *client, const char* payload) {
+    if (client == nullptr || client->status() != WS_CONNECTED) {
+        ws.textAll(payload);
+        return;
+    }
     Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr(), payload);
     size_t sent = client->text(payload);
     // AsyncWebSocketClient::text returns 0 when the message was dropped
@@ -1202,10 +1224,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         streamCadenceMs = (unsigned long)seconds * 1000UL;
         if (seconds != savedCadenceSec) {
             savedCadenceSec = seconds;
-            preferences.begin("plantpilot", false);
-            preferences.putInt("cadence", seconds);
-            preferences.end();
-            Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums, saved to NVS)\n", getLocalTimeStr(), seconds, streamCadenceMs);
+            Serial.printf("[%s] [SYNC] Sensor cadence changed → %ds (%lums)\n", getLocalTimeStr(), seconds, streamCadenceMs);
         }
 
         JsonDocument okDoc;
@@ -1215,6 +1234,14 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         okDoc["cadence"] = seconds;
         serializeJson(okDoc, localBuf, sizeof(localBuf));
         sendWsRaw(client, localBuf);
+    } else if (cmd == "DEMO_MODE_ON") {
+        demoModeActive = true;
+        Serial.println("[DEMO] Demo Mode ON (min_interval_hours bypassed while app connected)");
+        sendOkResponse(client, cmd, false);
+    } else if (cmd == "DEMO_MODE_OFF") {
+        demoModeActive = false;
+        Serial.println("[DEMO] Demo Mode OFF");
+        sendOkResponse(client, cmd, false);
     } else if (cmd == "CAL_STREAM_ON") {
         calibrationStreamActive = true;
         Serial.println("[SENSOR] Calibration streaming ON (1s cadence)");
@@ -1256,12 +1283,17 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
             stopQueue[i].pending = true; // Queue stop in main loop
         }
         sendOkResponse(client, cmd, true);
-    } else if (cmd.startsWith("PUMP") && cmd.endsWith("_ON")) {
+    } else if (cmd.startsWith("PUMP") && cmd.indexOf("_ON") >= 0) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
-        if (id >= 0 && id < 4) requestPumpStart(id, 0, "manual");
+        int amountMl = 0;
+        int spaceIdx = cmd.indexOf(' ');
+        if (spaceIdx > 0) {
+            amountMl = cmd.substring(spaceIdx + 1).toInt();
+        }
+        if (id >= 0 && id < 4) requestPumpStart(id, amountMl, "manual");
         sendOkResponse(client, cmd, true);
-    } else if (cmd.startsWith("PUMP") && cmd.endsWith("_OFF")) {
+    } else if (cmd.startsWith("PUMP") && cmd.indexOf("_OFF") >= 0) {
         char letter = cmd.charAt(4);
         int id = (letter >= 'A' && letter <= 'D') ? (letter - 'A') : (letter - '1');
         if (id >= 0 && id < 4) {
@@ -1618,13 +1650,15 @@ void setup() {
     Serial.println("=============================================\n");
     initStatusLed(); initButton(); initRelays(); loadConfigs(); initChannelPolling();
 
+    loadHistoryFromNVS();
+
     // Load persisted time and rebase against current boot millis
     preferences.begin("time", true);
     TimeSyncData timeData = {0, 0};
     preferences.getBytes("sync", &timeData, sizeof(timeData));
     preferences.end();
     if (timeData.epoch != 0) {
-        bootEpochOffset = timeData.epoch - timeData.syncMillis / 1000;
+        bootEpochOffset = timeData.epoch;
         Serial.printf("[TIME] Boot epoch offset: %lu (persisted epoch %lu)\n", bootEpochOffset, timeData.epoch);
     }
 

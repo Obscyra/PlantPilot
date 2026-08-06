@@ -42,7 +42,10 @@ class MainActivity : ComponentActivity() {
     private val hardwareConnection get() = (application as PlantPilotApp).hardwareConnection
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
+        val splashScreen = installSplashScreen()
+        splashScreen.setKeepOnScreenCondition {
+            viewModel.isLoadingOnboarding
+        }
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
@@ -101,6 +104,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun PlantPilotApp(viewModel: PlantPilotViewModel) {
+    if (viewModel.isLoadingOnboarding) return
+
     val navController = rememberNavController()
     val showOnboarding = viewModel.showOnboarding
 

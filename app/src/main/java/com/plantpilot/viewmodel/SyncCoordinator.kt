@@ -146,8 +146,8 @@ class SyncCoordinator(
             }
             if (changed) persistPlants()
         }
-        // Optimization: Remove force = true. Only push if isConfigDirty.
-        syncConfigWithDevice(silent = true, force = false)
+        // Force sync on reconnect so offline history entries are retrieved from the device
+        syncConfigWithDevice(silent = true, force = true)
     }
 
     /**

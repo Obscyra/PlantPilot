@@ -21,6 +21,7 @@ import com.plantpilot.model.Plant
 import com.plantpilot.model.WateringMode
 import com.plantpilot.model.WateringSchedule
 import com.plantpilot.ui.components.ConnectionStatusChip
+import com.plantpilot.ui.components.DemoModeBanner
 import com.plantpilot.ui.components.MoistureRing
 import com.plantpilot.ui.components.ScheduleBottomSheet
 import com.plantpilot.viewmodel.PlantPilotViewModel
@@ -101,6 +102,12 @@ fun PlantsListScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (settings.demoMode) {
+                    item(key = "demo_mode_banner") {
+                        DemoModeBanner(onTurnOff = { viewModel.setDemoMode(false) })
+                    }
+                }
+
                 items(plants, key = { it.id }) { plant ->
                     ElevatedCard(
                         modifier = Modifier
@@ -327,7 +334,7 @@ fun PlantsListScreen(
 
                             // Water Amount
                             Column {
-                                var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
+                                var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.coerceIn(10, 100).toFloat()) }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
@@ -351,9 +358,16 @@ fun PlantsListScreen(
                                     onValueChangeFinished = {
                                         viewModel.updateWateringAmount(plant.id, editableWaterAmount.toInt())
                                     },
-                                    valueRange = 20f..200f,
+                                    valueRange = 10f..100f,
                                     steps = 8
                                 )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("10 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("100 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }

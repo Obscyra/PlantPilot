@@ -77,6 +77,14 @@ fun HomeScreen(
                 contentPadding = PaddingValues(all = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(space = 12.dp),
             ) {
+                if (settings.demoMode) {
+                    item(key = "demo_mode_banner") {
+                        com.plantpilot.ui.components.DemoModeBanner(
+                            onTurnOff = { viewModel.setDemoMode(false) }
+                        )
+                    }
+                }
+
                 // Water tank card
                 item(key = "water_tank") {
                     Card(

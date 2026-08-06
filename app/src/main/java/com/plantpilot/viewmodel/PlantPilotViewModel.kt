@@ -26,7 +26,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -113,7 +112,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     var isRefreshingDevice by mutableStateOf(value = false)
         private set
 
-    var showOnboarding by mutableStateOf(value = true)
+    var showOnboarding by mutableStateOf(value = false)
+        private set
+
+    var isLoadingOnboarding by mutableStateOf(value = true)
         private set
 
     private var wasPreviouslyConnected: Boolean = false
@@ -236,19 +238,53 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             settingsManager.appSettingsFlow.collect { _settings.value = it }
         }
 
+        viewModelScope.launch {
+            hardwareRepository.connectionState.collect { state ->
+                if (state == ConnectionState.Connected) {
+                    val isDemo = _settings.value.demoMode
+                    hardwareRepository.sendCommand(if (isDemo) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
+                }
+            }
+        }
+
         // Hydrate persisted plants (schedules/config survive full app restarts).
         viewModelScope.launch {
-            settingsManager.plantsFlow.first()?.let { saved ->
-                _plants.update { saved }
+            val saved = settingsManager.plantsFlow.first()
+            val hasMigratedV2 = settingsManager.plantsMigratedV2Flow.first()
+
+            if (saved != null) {
+                if (!hasMigratedV2) {
+                    // One-time migration of default plant names for existing installs
+                    val migrated = saved.map { plant ->
+                        if (plant.lastUpdated == 0L && plant.configVersion <= 1) {
+                            when (plant.name) {
+                                "Monstera Deliciosa" -> plant.copy(name = "Money Plant")
+                                "Fiddle Leaf Fig" -> plant.copy(name = "Aloe Vera")
+                                "Spider Plant" -> plant.copy(name = "Snake Plant")
+                                "Tulsi" -> plant.copy(name = "Rose")
+                                "Snake Plant" -> if (plant.motorNumber == 2) plant.copy(name = "Rose") else plant
+                                else -> plant
+                            }
+                        } else plant
+                    }
+                    _plants.update { migrated }
+                    settingsManager.savePlants(migrated)
+                    settingsManager.savePlantsMigratedV2(true)
+                } else {
+                    // Already migrated once: preserve user's edited plant names exact as saved
+                    _plants.update { saved }
+                }
             }
             // Once the first real hydration is done, clear the loading flag.
             // This prevents the "flash of empty mocks" on startup.
             isLoading = false
         }
 
-        // Read the persisted onboarding flag synchronously
-        runBlocking {
-            showOnboarding = !settingsManager.onboardingCompletedFlow.first()
+        viewModelScope.launch {
+            settingsManager.onboardingCompletedFlow.collect { completed ->
+                showOnboarding = !completed
+                isLoadingOnboarding = false
+            }
         }
 
         viewModelScope.launch {
@@ -416,11 +452,15 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         notificationHelper.showWateringStarted(plant.name)
         hardwareRepository.setWateringInProgress(true)
 
-        // Launch HTTP request asynchronously in background without blocking animation
+        // Execute command: use high-speed WebSocket command if connected, else fallback to REST
         viewModelScope.launch {
-            try {
-                repository.waterNow(plant.motorNumber, plant.mlPerSec, plant.waterAmountMl)
-            } catch (_: Exception) {
+            if (hardwareRepository.connectionState.value == ConnectionState.Connected) {
+                hardwareRepository.sendCommand("PUMP${plant.motorNumber}_ON ${plant.waterAmountMl}")
+            } else {
+                try {
+                    repository.waterNow(plant.motorNumber, plant.mlPerSec, plant.waterAmountMl)
+                } catch (_: Exception) {
+                }
             }
         }
 
@@ -481,6 +521,14 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         updateSettings { it.copy(sensorCadenceSec = seconds) }
         hardwareRepository.logUserAction("Settings: Sensor update rate → ${seconds}s")
         hardwareRepository.setStreamCadence(seconds)
+    }
+
+    fun setDemoMode(enabled: Boolean) {
+        updateSettings { it.copy(demoMode = enabled) }
+        hardwareRepository.logUserAction("Settings: Demo Mode → ${if (enabled) "ON" else "OFF"}")
+        if (hardwareRepository.connectionState.value == ConnectionState.Connected) {
+            hardwareRepository.sendCommand(if (enabled) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
+        }
     }
 
     fun updatePumpFlowRate(mlPerSec: Int) {

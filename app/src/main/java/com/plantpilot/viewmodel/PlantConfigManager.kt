@@ -47,7 +47,7 @@ class PlantConfigManager(
     }
 
     fun updateWateringAmount(plantId: String, amountMl: Int) {
-        updatePlant(plantId, autoSync = true) { it.copy(waterAmountMl = amountMl) }
+        updatePlant(plantId, autoSync = true) { it.copy(waterAmountMl = amountMl.coerceIn(10, 100)) }
     }
 
     fun updatePlantName(plantId: String, name: String) {

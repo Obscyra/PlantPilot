@@ -50,7 +50,7 @@ fun PlantDetailScreen(
 
     var editableName by remember(plant.name) { mutableStateOf(plant.name) }
     var editableNameFocused by remember { mutableStateOf(false) }
-    var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.toFloat()) }
+    var editableWaterAmount by remember(plant.waterAmountMl) { mutableFloatStateOf(plant.waterAmountMl.coerceIn(10, 100).toFloat()) }
     var editableThreshold by remember(plant.moistureThreshold) { mutableFloatStateOf(plant.moistureThreshold.toFloat()) }
     var editableMinInterval by remember(plant.minIntervalHours) { mutableFloatStateOf(plant.minIntervalHours.toFloat()) }
 
@@ -61,6 +61,15 @@ fun PlantDetailScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+
+    DisposableEffect(plantId) {
+        onDispose {
+            if (editableName.isNotBlank() && editableName != plant.name) {
+                viewModel.updatePlantName(plantId, editableName)
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.commandBlockedEvents.collect { message ->
@@ -74,7 +83,12 @@ fun PlantDetailScreen(
             TopAppBar(
                 title = { Text(plant.name) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        if (editableName.isNotBlank() && editableName != plant.name) {
+                            viewModel.updatePlantName(plantId, editableName)
+                        }
+                        onBack()
+                    }) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back"
@@ -114,11 +128,22 @@ fun PlantDetailScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onFocusChanged { state ->
-                        if (!state.isFocused && editableName != plant.name) {
+                        if (!state.isFocused && editableName.isNotBlank() && editableName != plant.name) {
                             viewModel.updatePlantName(plantId, editableName)
                         }
                         editableNameFocused = state.isFocused
                     },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = {
+                        if (editableName.isNotBlank() && editableName != plant.name) {
+                            viewModel.updatePlantName(plantId, editableName)
+                        }
+                        focusManager.clearFocus()
+                    }
+                ),
                 singleLine = true
             )
 
@@ -178,7 +203,7 @@ fun PlantDetailScreen(
                         onValueChangeFinished = {
                             viewModel.updateWateringAmount(plantId, editableWaterAmount.toInt())
                         },
-                        valueRange = 20f..200f,
+                        valueRange = 10f..100f,
                         steps = 8,
                         modifier = Modifier.fillMaxWidth(),
                         enabled = true
@@ -187,8 +212,8 @@ fun PlantDetailScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("20 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("200 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("10 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("100 ml", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -472,9 +497,9 @@ fun PlantDetailScreen(
     // Water now confirmation
     if (showWaterNowDialog) {
         ConfirmDialog(
-            title = "Water Now",
-            message = "Start watering ${plant.name} with ${plant.waterAmountMl}ml?",
-            confirmText = "Water",
+            title = "Nourish ${plant.name}",
+            message = "Dispense ${plant.waterAmountMl} ml of fresh water to ${plant.name} now?",
+            confirmText = "Start Watering",
             onConfirm = {
                 showWaterNowDialog = false
                 if (canSendCommands) {

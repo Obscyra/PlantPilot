@@ -361,7 +361,7 @@ fun SettingsScreen(
 
                     HorizontalDivider()
 
-                    // Motor & Sensors
+                    // Hardware Settings
                     Surface(
                         onClick = onNavigateToHardwareSettings,
                         color = Color.Transparent,
@@ -373,7 +373,7 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Motor & Sensors",
+                                    text = "Hardware Settings",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )

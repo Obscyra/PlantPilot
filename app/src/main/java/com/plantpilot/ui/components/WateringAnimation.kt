@@ -19,6 +19,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.plantpilot.R
 
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+
 @Composable
 fun WateringOverlay(
     plantName: String,
@@ -26,33 +33,65 @@ fun WateringOverlay(
 ) {
     Surface(
         modifier = modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.95f)
+        color = Color.Black
     ) {
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
             WateringScene(
                 modifier = Modifier
-                    .size(320.dp)
-                    .clip(RoundedCornerShape(24.dp))
+                    .size(340.dp)
+                    .background(Color.Black)
             )
 
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "Watering $plantName",
-                style = MaterialTheme.typography.headlineSmall,
+                text = "Nourishing $plantName",
+                style = MaterialTheme.typography.headlineMedium,
                 color = Color.White,
                 fontWeight = FontWeight.Bold
             )
-            
-            Text(
-                text = "Giving your plant some love...",
-                style = MaterialTheme.typography.bodyLarge,
-                color = Color.White.copy(alpha = 0.7f)
-            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val sentences = remember(plantName) {
+                listOf(
+                    "Dispensing fresh water to keep $plantName healthy & thriving...",
+                    "Hydrating roots & replenishing soil moisture...",
+                    "Giving $plantName the perfect dose of hydration...",
+                    "Soaking up essential moisture for vibrant growth..."
+                )
+            }
+            var currentSentenceIdx by remember { mutableIntStateOf(0) }
+
+            LaunchedEffect(plantName) {
+                while (isActive) {
+                    delay(3200L)
+                    currentSentenceIdx = (currentSentenceIdx + 1) % sentences.size
+                }
+            }
+
+            AnimatedContent(
+                targetState = sentences[currentSentenceIdx],
+                transitionSpec = {
+                    (fadeIn(tween(600)) + slideInVertically { it / 2 }) togetherWith
+                    (fadeOut(tween(600)) + slideOutVertically { -it / 2 })
+                },
+                label = "watering_sentence"
+            ) { sentence ->
+                Text(
+                    text = sentence,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White.copy(alpha = 0.85f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
+            }
         }
     }
 }

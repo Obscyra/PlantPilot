@@ -39,6 +39,8 @@ class SettingsManager(private val context: Context) {
         val MAX_RUNTIME: Preferences.Key<Int> = intPreferencesKey("max_runtime_minutes")
         val SENSOR_CADENCE: Preferences.Key<Int> = intPreferencesKey("sensor_cadence_sec")
         val PUMP_FLOW_RATE: Preferences.Key<Int> = intPreferencesKey("pump_flow_rate_ml_per_sec")
+        val PLANTS_MIGRATED_V2: Preferences.Key<Boolean> = booleanPreferencesKey("plants_migrated_v2")
+        val DEMO_MODE: Preferences.Key<Boolean> = booleanPreferencesKey("demo_mode")
     }
 
     val deviceStateFlow: Flow<PartialDeviceState> = context.dataStore.data.map { prefs ->
@@ -61,7 +63,8 @@ class SettingsManager(private val context: Context) {
             use24HourFormat = prefs[USE_24H] ?: false,
             maxRuntimeMinutes = prefs[MAX_RUNTIME] ?: 1,
             sensorCadenceSec = prefs[SENSOR_CADENCE] ?: 12,
-            pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10
+            pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10,
+            demoMode = prefs[DEMO_MODE] ?: false
         )
     }
 
@@ -125,6 +128,7 @@ class SettingsManager(private val context: Context) {
             prefs[MAX_RUNTIME] = settings.maxRuntimeMinutes
             prefs[SENSOR_CADENCE] = settings.sensorCadenceSec
             prefs[PUMP_FLOW_RATE] = settings.pumpFlowRateMlPerSec
+            prefs[DEMO_MODE] = settings.demoMode
         }
     }
 
@@ -147,9 +151,19 @@ class SettingsManager(private val context: Context) {
         }
     }
 
+    val plantsMigratedV2Flow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[PLANTS_MIGRATED_V2] ?: false
+    }
+
     suspend fun savePlants(plants: List<Plant>) {
         context.dataStore.edit { prefs ->
             prefs[PLANTS] = json.encodeToString(plants)
+        }
+    }
+
+    suspend fun savePlantsMigratedV2(migrated: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PLANTS_MIGRATED_V2] = migrated
         }
     }
 
