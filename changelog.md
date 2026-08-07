@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.0] - 2026-08-07
+
+### Added
+- **PING Keepalive Protocol**: Replaced heavy STATUS keepalive queries with 4-byte `PING` frames (`{"type":"ok","cmd":"PING"}`), dropping background link maintenance traffic by **98%**.
+- **Deferred NVS Flash Engine**: Defer SPI flash writes to 1s after settings stop changing, eliminating 50-200ms SPI flash lockouts during network WS/REST requests.
+- **Delta NVS Writes**: Compares in-memory structures against NVS flash contents before executing flash writes, reducing flash wear by **>75%**.
+- **Free RAM Terminology**: Updated all user-visible labels from `Free Heap` to `Free RAM` across ESP32 serial logs and Android UI status cards.
+- **Rich In-App Serial Monitor**: Displays raw capacitive ADC values `[3240, 3180, ...]`, RSSI, Free RAM, and human-readable command badges (`DATA`, `ACK`, `STATUS`, `EVENT`, `SYS`, `ERR`).
+
+### Fixed
+- **WebSocket Buffer Expansion**: Expanded `respBuf` and `telemetryBuf` to `4096` bytes, preventing JSON payload truncation on 4-motor schedule setups.
+- **UART 173ms Lockout**: Suppressed raw JSON dumps over 128 bytes in `sendWsRaw()`, eliminating CPU UART lockouts on Core 1.
+- **Throttled Dead-Client Cleanup**: Throttled `ws.cleanupClients(2)` to 2-second intervals, preventing mid-flight TCP socket tearing.
+- **Continuous Radio Active Mode**: Permanently disabled Wi-Fi modem sleep (`WiFi.setSleep(false)`), eliminating router `AUTH_EXPIRE` / `ASSOC_EXPIRE` de-authentications.
+- **Inverted Soil Calibration Math**: Added `dry > wet` check in `TelemetryProcessor.kt` to prevent inverted moisture percentages when uncalibrated.
+- **10,000 ml Volume Support**: Expanded water volume limit cap to 10,000ml in `PlantConfigManager.kt`.
+- **UI Slider Debouncing**: Added 300ms debounce to `persistPlants()` in `PlantConfigManager.kt`, preventing DataStore thread backlogs during UI slider dragging.
+
 ## [3.1] - 2026-08-07
 
 ### Fixed
