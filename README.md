@@ -80,15 +80,20 @@
 | 26 | Relay IN 2 (Pump 2) |
 | 27 | Relay IN 3 (Pump 3) |
 | 14 | Relay IN 4 (Pump 4) |
-| 34 | Soil moisture sensor 1 (ADC) |
-| 35 | Soil moisture sensor 2 (ADC) |
-| 32 | Soil moisture sensor 3 (ADC) |
-| 33 | Soil moisture sensor 4 (ADC) |
-| 16 | Water level sensor probe L1 (25% level, 330Ω resistor, active-low) |
-| 17 | Water level sensor probe L2 (50% level, 330Ω resistor, active-low) |
-| 18 | Water level sensor probe L3 (75% level, 330Ω resistor, active-low) |
-| 19 | Water level sensor probe L4 (100% level, 330Ω resistor, active-low) |
-| 21 | Piezo Buzzer (alarm beeps) |
+| 34 | Soil moisture sensor 1 Signal (ADC) |
+| 4  | Soil moisture sensor 1 VCC Power (Pulsed 3.3V) |
+| 35 | Soil moisture sensor 2 Signal (ADC) |
+| 5  | Soil moisture sensor 2 VCC Power (Pulsed 3.3V) |
+| 32 | Soil moisture sensor 3 Signal (ADC) |
+| 21 | Soil moisture sensor 3 VCC Power (Pulsed 3.3V) |
+| 33 | Soil moisture sensor 4 Signal (ADC) |
+| 22 | Soil moisture sensor 4 VCC Power (Pulsed 3.3V) |
+| 16 | Water level sensor probe L1 (25% level, 330Ω resistor) |
+| 17 | Water level sensor probe L2 (50% level, 330Ω resistor) |
+| 18 | Water level sensor probe L3 (75% level, 330Ω resistor) |
+| 19 | Water level sensor probe L4 (100% level, 330Ω resistor) |
+| 23 | Water level sensor common probe (Pulsed 3.3V power, prevents probe rust) |
+| 13 | Piezo Buzzer (alarm beeps) |
 | 2 | On-board status LED (built-in) |
 
 Soil moisture raw ADC is 12-bit (0–4095). Each sensor maps to a 0–100% reading using its own stored dry/wet calibration points: `map(raw, calibrationDry, calibrationWet, 0, 100)`. Before calibration the firmware uses default points (dry 4095, wet 1000).

@@ -49,7 +49,7 @@ fun DiagnosticsStatusSection(viewModel: PumpTestViewModel) {
                 )
                 StatusItem(
                     icon = Icons.Default.Memory,
-                    label = "Free Heap",
+                    label = "Free RAM",
                     value = if (telemetry?.free_heap != null) "${telemetry.free_heap / 1024} KB" else "--",
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -197,12 +197,16 @@ private fun parseJsonLog(jsonStr: String): Triple<String, String, Color> {
         when (type) {
             "telemetry" -> {
                 val soilArr = root["soil"]?.jsonArray?.map { it.jsonPrimitive.content }
+                val rawSoilArr = root["raw_soil"]?.jsonArray?.map { it.jsonPrimitive.content }
+                val waterLevel = root["water_level"]?.jsonPrimitive?.content
                 val rssi = root["wifi_rssi"]?.jsonPrimitive?.content
                 val heap = root["free_heap"]?.jsonPrimitive?.content?.toIntOrNull()
-                val soilStr = if (soilArr != null) "Soil Moisture: [${soilArr.joinToString("%")}%]" else "Telemetry Stream"
+                val soilStr = if (soilArr != null) "Soil: [${soilArr.joinToString("%")}%]" else "Telemetry Stream"
+                val rawStr = if (rawSoilArr != null) " (Raw ADC: [${rawSoilArr.joinToString(", ")}])" else ""
+                val tankStr = if (waterLevel != null) " • Tank: ${waterLevel}%" else ""
                 val rssiStr = if (rssi != null) " • RSSI: ${rssi} dBm" else ""
-                val heapStr = if (heap != null) " • Heap: ${heap / 1024} KB" else ""
-                Triple("DATA", "$soilStr$rssiStr$heapStr", LogSuccess)
+                val heapStr = if (heap != null) " • Free RAM: ${heap / 1024} KB" else ""
+                Triple("DATA", "$soilStr$rawStr$tankStr$rssiStr$heapStr", LogSuccess)
             }
             "ok" -> {
                 val cmd = root["cmd"]?.jsonPrimitive?.content ?: ""
@@ -211,8 +215,8 @@ private fun parseJsonLog(jsonStr: String): Triple<String, String, Color> {
             "status" -> {
                 val cadence = root["sensor_cadence_sec"]?.jsonPrimitive?.content
                 val tankLvl = root["water_level"]?.jsonPrimitive?.content
-                val tankStr = if (tankLvl != null) " • Water Level: Level $tankLvl" else ""
-                Triple("STATUS", "Hardware Status Received (Cadence: ${cadence ?: "12"}s$tankStr)", LogInfo)
+                val tankStr = if (tankLvl != null) " • Tank Level: ${tankLvl}%" else ""
+                Triple("STATUS", "Hardware Status Received (Cadence: ${cadence ?: "3"}s$tankStr)", LogInfo)
             }
             "watering_finished" -> {
                 val motor = root["motor"]?.jsonPrimitive?.content
@@ -261,6 +265,7 @@ private fun formatAppCommand(cmd: String): String {
             "Turn Pump $pumpNum $action"
         }
         cmd == "STATUS" -> "Request Device Status"
+        cmd == "PING" -> "Ping Keepalive"
         cmd == "READ_SENSORS" -> "Read All Soil Sensors"
         cmd == "RESET_CONFIG" -> "Factory Reset Device Config"
         cmd.startsWith("SYNC_MODE") -> "Set Telemetry Rate to ${cmd.removePrefix("SYNC_MODE ").trim()}s"
@@ -269,8 +274,12 @@ private fun formatAppCommand(cmd: String): String {
             val mins = cmd.removePrefix("BUZZ_CADENCE ").trim()
             if (mins == "0") "Disable Alarm Buzzer" else "Set Alarm Cadence to ${mins}m"
         }
-        cmd == "CAL_STREAM_ON" -> "Start Live Sensor Stream"
-        cmd == "CAL_STREAM_OFF" -> "Stop Live Sensor Stream"
+        cmd == "DEMO_MODE_ON" -> "Enable Demo Mode"
+        cmd == "DEMO_MODE_OFF" -> "Disable Demo Mode"
+        cmd == "HW_WATER_SENSOR_ON" -> "Enable Hardware Water Tank Sensor"
+        cmd == "HW_WATER_SENSOR_OFF" -> "Disable Hardware Water Tank Sensor"
+        cmd == "CAL_STREAM_ON" -> "Start Live Sensor Calibration Stream"
+        cmd == "CAL_STREAM_OFF" -> "Stop Live Sensor Calibration Stream"
         else -> cmd
     }
 }

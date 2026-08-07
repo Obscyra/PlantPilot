@@ -57,6 +57,9 @@
 
 Preferences preferences;
 
+#include <freertos/semphr.h>
+SemaphoreHandle_t sensorMutex = NULL;
+
 // =====================================================================================
 //  SECTION 1: SYSTEM CONFIGURATION & PIN MAPPINGS
 // =====================================================================================
@@ -173,8 +176,8 @@ MotorSettings motorConfigs[4];
 int soilMoisture[4] = {50, 50, 50, 50};
 int rawSoilCache[4] = {0, 0, 0, 0};
 
-// Buzzer Pin Assignment (GPIO 21)
-#define BUZZER_PIN 21
+// Buzzer Pin Assignment (GPIO 13)
+#define BUZZER_PIN 13
 
 struct BuzzerState {
     int remainingBeeps;
@@ -222,20 +225,71 @@ void updateBuzzer() {
 #define WL2 17
 #define WL3 18
 #define WL4 19
+#define WL_POWER_PIN 23 // GPIO 23 pulsed power VCC for tank common probe (prevents electrolysis)
+
+// Soil Moisture Sensor VCC Power Pins (pulsed power to prevent probe rust/electrolysis)
+#define SOIL_PWR_1 4
+#define SOIL_PWR_2 5
+#define SOIL_PWR_3 21
+#define SOIL_PWR_4 22
 
 int waterLevel = 100;
 int waterLevelDiscrete = 4; // 0..4 (0=Empty, 1=25%, 2=50%, 3=75%, 4=100%, -1=Sensor Error)
 bool demoModeActive = false;
 bool useHardwareWaterSensor = true; // Can be toggled ON/OFF by app setting
+int savedCadenceSec = 3;
+int lowWaterBuzzIntervalMin = 15; // 0 = Disabled, or 5, 15, 30, 60 minutes
+
+// Deferred NVS Flash Persistence Engine
+// Prevents SPI flash write lockouts during network WS/REST request handling.
+// Settings updates modify RAM immediately (0ms latency), and batch save to flash 1s later.
+static bool pendingNvsSave = false;
+static unsigned long nvsSaveDueMs = 0;
+
+void markNvsDirty() {
+    pendingNvsSave = true;
+    nvsSaveDueMs = millis() + 1000UL; // Batch save 1 second after settings stop changing
+}
+
+void flushNvsConfigs() {
+    if (!pendingNvsSave) return;
+    pendingNvsSave = false;
+
+    preferences.begin("plantpilot", false);
+    if (preferences.getBool("hw_sensor", !useHardwareWaterSensor) != useHardwareWaterSensor) {
+        preferences.putBool("hw_sensor", useHardwareWaterSensor);
+    }
+    if (preferences.getInt("cadence", -1) != savedCadenceSec) {
+        preferences.putInt("cadence", savedCadenceSec);
+    }
+    if (preferences.getInt("buzz_cadence", -1) != lowWaterBuzzIntervalMin) {
+        preferences.putInt("buzz_cadence", lowWaterBuzzIntervalMin);
+    }
+
+    for (int i = 1; i <= 4; i++) {
+        char key[16];
+        sprintf(key, "motor%d", i);
+        MotorSettings existing;
+        memset(&existing, 0, sizeof(MotorSettings));
+        if (preferences.getBytes(key, &existing, sizeof(MotorSettings)) == 0 ||
+            memcmp(&existing, &motorConfigs[i - 1], sizeof(MotorSettings)) != 0) {
+            preferences.putBytes(key, &motorConfigs[i - 1], sizeof(MotorSettings));
+        }
+    }
+    preferences.end();
+    Serial.printf("[%s] [NVS] Delta configuration batch saved to flash\n", getLocalTimeStr());
+}
 
 void saveHwWaterSensorSetting(bool enabled) {
     useHardwareWaterSensor = enabled;
-    preferences.begin("plantpilot", false);
-    preferences.putBool("hw_sensor", enabled);
-    preferences.end();
+    if (!enabled) {
+        digitalWrite(WL_POWER_PIN, LOW); // Cut power completely when disabled
+    } else if (demoModeActive) {
+        digitalWrite(WL_POWER_PIN, HIGH); // Solid 3.3V power in Demo Mode
+    }
+    markNvsDirty();
 }
 
-int lowWaterBuzzIntervalMin = 15; // 0 = Disabled, or 5, 15, 30, 60 minutes
 unsigned long lastLowWaterBuzzMs = 0;
 
 void checkLowWaterBuzzer() {
@@ -254,6 +308,40 @@ void checkLowWaterBuzzer() {
     }
 }
 
+// =====================================================================================
+// HARDWARE WATER LEVEL INDICATOR SENSOR WIRING & PIN MAPPING (DO NOT MODIFY LOGIC)
+// =====================================================================================
+// +-----------+------------------------+-----------------+-------------------------------+
+// | ESP32 Pin | Component / Probe      | Tank Position   | Circuit Details               |
+// +-----------+------------------------+-----------------+-------------------------------+
+// | GPIO 23   | Common Power Probe     | Bottom of Tank  | Pulsed 3.3V power (prevents   |
+// |           |                        |                 | electrolysis & probe rust)    |
+// | GPIO 16   | WL1 Probe (25% Level)  | 25% Height      | 330 ohm inline resistor       |
+// | GPIO 17   | WL2 Probe (50% Level)  | 50% Height      | 330 ohm inline resistor       |
+// | GPIO 18   | WL3 Probe (75% Level)  | 75% Height      | 330 ohm inline resistor       |
+// | GPIO 19   | WL4 Probe (100% Level) | 100% Height     | 330 ohm inline resistor       |
+// +-----------+------------------------+-----------------+-------------------------------+
+//
+// DIAGRAM:
+//                 +-------------------+
+//                 |    ESP32 DevKit   |
+//                 +-------------------+
+//                   |     |     |     |
+//                 GPIO  GPIO  GPIO  GPIO
+//                  16    17    18    19
+//                   |     |     |     |
+//                 [330Ω][330Ω][330Ω][330Ω]   <- Inline Resistors
+//                   |     |     |     |
+//                 WL1   WL2   WL3   WL4
+//                (25%) (50%) (75%)(100%)
+//                 |     |     |     |
+//  ~~~~~~~~~~~~~~~|~~~~~|~~~~~|~~~~~|~~~~~~~~~~~~~  <- Water Line
+//  ~              |     |     |     |            ~
+//  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//                 |
+//               GPIO 23 (Pulsed 3.3V Common Probe at Tank Bottom)
+// =====================================================================================
+
 // Helper to sample a probe pin with majority voting against electrical noise
 static bool sampleProbeSubmerged(int pin) {
     pinMode(pin, INPUT_PULLUP);
@@ -262,25 +350,55 @@ static bool sampleProbeSubmerged(int pin) {
         if (digitalRead(pin) == LOW) lowCount++;
         delay(2);
     }
-    return (lowCount >= 2); // True if probe is pulled to GND by water
+    return (lowCount >= 2);
 }
 
-// Read all 4 water level probes (GPIO 16, 17, 18, 19 with 330 Ohm resistors & INPUT_PULLUP)
+// Read all 4 water level probes (GPIO 16, 17, 18, 19 with 330 Ohm resistors)
 int readHardwareWaterLevel() {
-    if (!useHardwareWaterSensor) {
+    if (sensorMutex != NULL) {
+        if (xSemaphoreTakeRecursive(sensorMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            return waterLevelDiscrete; // Mutex timeout safeguard
+        }
+    }
+
+    if (!useHardwareWaterSensor && !demoModeActive) {
+        digitalWrite(WL_POWER_PIN, LOW);
+        static unsigned long lastHwOffLog = 0;
+        if (millis() - lastHwOffLog > 60000UL) {
+            lastHwOffLog = millis();
+            Serial.printf("[%s] [WATER_SENSOR] Hardware Water Sensor is currently DISABLED by app settings\n", getLocalTimeStr());
+        }
+        if (sensorMutex != NULL) {
+            xSemaphoreGiveRecursive(sensorMutex);
+        }
         return waterLevelDiscrete; // Disabled by app setting — skip pin reading & logs
     }
+
+    if (demoModeActive) {
+        // Demo Mode: Solid 3.3V power to tank common probe (LED glows solid)
+        digitalWrite(WL_POWER_PIN, HIGH);
+    } else {
+        // Normal Mode: Pulse 3.3V power for 15ms sampling duration only (prevents probe corrosion & power sag)
+        digitalWrite(WL_POWER_PIN, HIGH);
+        delay(15); // Fast 15ms stabilization (prevents CPU blocking & power rail sag)
+    }
+
     bool l1 = sampleProbeSubmerged(WL1);
     bool l2 = sampleProbeSubmerged(WL2);
     bool l3 = sampleProbeSubmerged(WL3);
     bool l4 = sampleProbeSubmerged(WL4);
+
+    if (!demoModeActive) {
+        // Normal Mode: De-energize tank common probe (0V) immediately after sampling
+        digitalWrite(WL_POWER_PIN, LOW);
+    }
 
     int percent = 0;
 
     if (l4 && l3 && l2 && l1)
         percent = 100;
     else if (!l4 && l3 && l2 && l1)
-        percent = 75;
+    percent = 75;
     else if (!l4 && !l3 && l2 && l1)
         percent = 50;
     else if (!l4 && !l3 && !l2 && l1)
@@ -339,6 +457,10 @@ int readHardwareWaterLevel() {
 
     waterLevelDiscrete = winningLevel;
     waterLevel = percent;
+
+    if (sensorMutex != NULL) {
+        xSemaphoreGiveRecursive(sensorMutex);
+    }
     return winningLevel;
 }
 
@@ -365,7 +487,7 @@ ChannelPollState channelPoll[4];
 // Single Motor Busy Lock: Only ONE motor runs at a time to prevent power brownouts
 int activeMotorIndex = -1;
 
-const unsigned long SENSOR_READ_INTERVAL_MS = 600000UL; // 10 minutes default sensor poll
+const unsigned long SENSOR_READ_INTERVAL_MS = 1800000UL; // 30 minutes default background sensor poll
 volatile bool calibrationStreamActive = false;
 volatile bool telemetryPaused = false;
 volatile unsigned long firstTelemetryAfterConnectMs = 0;
@@ -528,11 +650,7 @@ void releaseMotorLock() {
     activeMotorIndex = -1;
 }
 
-// Telemetry cadence requested by the app via SYNC_MODE. Foreground -> 1s,
-// background -> 3s, no clients -> 60s. Reset to 3s on boot; the app re-sends
-// its mode whenever it (re)connects.
 volatile unsigned long streamCadenceMs = 3000UL;
-int savedCadenceSec = 3;
 
 // Last time the heavy per-motor config array was included in a telemetry frame
 // (signature of versions/timestamps). Reset to 0 on boot and whenever a WS
@@ -596,7 +714,7 @@ unsigned long getNow() {
 // hours fragments the heap and eventually kills the WS send path. Reuse one doc
 // and one fixed buffer so the steady-state frame path does zero heap allocation.
 static JsonDocument telemetryDoc;
-static char telemetryBuf[2048];
+static char telemetryBuf[4096];
 
 // Global max loop iteration time for diagnostics — updated by loop(), read by broadcastTelemetry()
 unsigned long g_maxLoopMs = 0;
@@ -612,24 +730,27 @@ void logIdleStatus() {
 
     bool wifiUp = (WiFi.status() == WL_CONNECTED);
     if (wifiUp) {
-        Serial.printf("[%s] [IDLE] WiFi OK (%d dBm) | 0 app clients | heap=%u | uptime=%lus\n",
+        Serial.printf("[%s] [IDLE] WiFi OK (%d dBm) | 0 app clients | free_ram=%u | uptime=%lus\n",
             getLocalTimeStr(), (int)WiFi.RSSI(), ESP.getFreeHeap(), millis() / 1000);
     } else {
-        Serial.printf("[%s] [IDLE] WiFi DISCONNECTED | heap=%u | uptime=%lus\n",
+        Serial.printf("[%s] [IDLE] WiFi DISCONNECTED | free_ram=%u | uptime=%lus\n",
             getLocalTimeStr(), ESP.getFreeHeap(), millis() / 1000);
     }
 }
 
 void broadcastTelemetry() {
     if (ws.count() == 0) { logIdleStatus(); return; }
+    if (sensorMutex != NULL) {
+        if (xSemaphoreTakeRecursive(sensorMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            return; // Mutex timeout safeguard
+        }
+    }
     readHardwareWaterLevel();
     telemetryDoc.clear();
     JsonDocument &doc = telemetryDoc;
     doc["type"] = "telemetry";
     doc["water_level"] = waterLevel;
     doc["water_level_raw"] = waterLevelDiscrete;
-    doc["demo_mode"] = demoModeActive;
-    doc["ntp_synced"] = timeSet;
 
     JsonArray queued = doc["queued"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
@@ -658,6 +779,7 @@ void broadcastTelemetry() {
         for (int i = 0; i < 4; i++) {
             rawSoilCache[i] = readRawSensor(i);
             soilMoisture[i] = rawToPercent(i, rawSoilCache[i]);
+            delay(1); // Yield 1ms to FreeRTOS IDLE & AsyncTCP task between channel reads
         }
     }
 
@@ -669,15 +791,9 @@ void broadcastTelemetry() {
     }
 
     doc["wifi_rssi"] = WiFi.RSSI();
-    // Use cached SSID to avoid temp String allocation every frame
-    if (cachedWifiSsid.length() == 0 && WiFi.status() == WL_CONNECTED) {
-        cachedWifiSsid = WiFi.SSID();
-    }
-    doc["wifi_ssid"] = cachedWifiSsid;
     doc["uptime_sec"] = millis() / 1000;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["epoch"] = getNow();
-    doc["sensor_cadence_sec"] = savedCadenceSec;
 
     JsonArray pumpsState = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) {
@@ -701,6 +817,14 @@ void broadcastTelemetry() {
     bool motorsChanged = (sig != motorsSig);
     bool motorsDue = (motorsLastSentMs == 0) || (motorsNow - motorsLastSentMs >= 30000UL);
     if (motorsChanged || motorsDue) {
+        doc["use_hw_sensor"] = useHardwareWaterSensor;
+        doc["demo_mode"] = demoModeActive;
+        doc["ntp_synced"] = timeSet;
+        if (cachedWifiSsid.length() == 0 && WiFi.status() == WL_CONNECTED) {
+            cachedWifiSsid = WiFi.SSID();
+        }
+        doc["wifi_ssid"] = cachedWifiSsid;
+        doc["sensor_cadence_sec"] = savedCadenceSec;
         motorsSig = sig;
         motorsLastSentMs = motorsNow;
         JsonArray motors = doc["motors"].to<JsonArray>();
@@ -735,22 +859,36 @@ void broadcastTelemetry() {
     if (jsonSize >= sizeof(telemetryBuf)) {
         Serial.printf("[%s] [ERR] Telemetry payload too large (%u bytes) - truncated\n",
             getLocalTimeStr(), (unsigned)jsonSize);
+        if (sensorMutex != NULL) xSemaphoreGiveRecursive(sensorMutex);
         return;
     }
     ws.textAll(telemetryBuf);
 
-    // Throttled serial mirror so the IDE monitor shows live data like the app's
-    // log screen, without flooding (max 1/sec, only while a client is connected).
+    // Smart Serial Telemetry Monitor:
+    // Logs telemetry only when values change or every 10 seconds (prevents 1s serial log clutter)
     static unsigned long lastTeleLog = 0;
+    static int lastSoilLog[4] = {-1, -1, -1, -1};
+    static int lastWaterLog = -1;
     unsigned long nowMs = millis();
-    if (nowMs - lastTeleLog >= 1000) {
+
+    bool valuesChanged = (waterLevel != lastWaterLog) ||
+        (soilMoisture[0] != lastSoilLog[0]) || (soilMoisture[1] != lastSoilLog[1]) ||
+        (soilMoisture[2] != lastSoilLog[2]) || (soilMoisture[3] != lastSoilLog[3]);
+
+    if (valuesChanged || (nowMs - lastTeleLog >= 10000UL)) {
         lastTeleLog = nowMs;
-        Serial.printf("[%s] [TELE] water=%d%% (L%d) soil=%d,%d,%d,%d raw=%d,%d,%d,%d heap=%u rssi=%d\n",
+        lastWaterLog = waterLevel;
+        for (int i = 0; i < 4; i++) lastSoilLog[i] = soilMoisture[i];
+
+        Serial.printf("[%s] [TELE] Tank: %d%% (L%d) | Soil: [%d%%, %d%%, %d%%, %d%%] | Free RAM: %u | RSSI: %d dBm\n",
             getLocalTimeStr(),
             waterLevel, waterLevelDiscrete,
             soilMoisture[0], soilMoisture[1], soilMoisture[2], soilMoisture[3],
-            rawSoilCache[0], rawSoilCache[1], rawSoilCache[2], rawSoilCache[3],
             ESP.getFreeHeap(), (int)WiFi.RSSI());
+    }
+
+    if (sensorMutex != NULL) {
+        xSemaphoreGiveRecursive(sensorMutex);
     }
 }
 
@@ -819,6 +957,14 @@ void initRelays() {
     pinMode(WL2, INPUT_PULLUP);
     pinMode(WL3, INPUT_PULLUP);
     pinMode(WL4, INPUT_PULLUP);
+    pinMode(WL_POWER_PIN, OUTPUT);
+    digitalWrite(WL_POWER_PIN, useHardwareWaterSensor ? HIGH : LOW); // Solid 3.3V power when enabled
+
+    // Configure soil moisture sensor power pins (GPIO 4, 5, 21, 22 - default LOW / OFF)
+    pinMode(SOIL_PWR_1, OUTPUT); digitalWrite(SOIL_PWR_1, LOW);
+    pinMode(SOIL_PWR_2, OUTPUT); digitalWrite(SOIL_PWR_2, LOW);
+    pinMode(SOIL_PWR_3, OUTPUT); digitalWrite(SOIL_PWR_3, LOW);
+    pinMode(SOIL_PWR_4, OUTPUT); digitalWrite(SOIL_PWR_4, LOW);
 }
 
 void initStatusLed() {
@@ -906,14 +1052,42 @@ void updateStatusLed() {
 // Averages several ADC samples to suppress ESP32 analog noise.
 // Revision 1.0 silicon is particularly sensitive to Wi-Fi noise, so we use
 // 32 samples with small delays to ensure a stable reading.
+// Pulses the sensor's individual VCC power pin (GPIO 4, 5, 21, 22) for 100ms
+// only during sampling to eliminate probe electrolysis & idle power draw.
 int readRawSensor(int index) {
     if (index < 0 || index >= 4) return 0;
+
+    static unsigned long lastRawReadMs[4] = {0, 0, 0, 0};
+    unsigned long nowMs = millis();
+    if (nowMs - lastRawReadMs[index] < 500UL && rawSoilCache[index] > 0) {
+        return rawSoilCache[index];
+    }
+    lastRawReadMs[index] = nowMs;
+
+    int pwrPin = -1;
+    switch (index) {
+        case 0: pwrPin = SOIL_PWR_1; break;
+        case 1: pwrPin = SOIL_PWR_2; break;
+        case 2: pwrPin = SOIL_PWR_3; break;
+        case 3: pwrPin = SOIL_PWR_4; break;
+    }
+
+    if (pwrPin != -1) {
+        digitalWrite(pwrPin, HIGH); // Pulse power ON to sensor VCC
+        delay(15);                  // Fast 15ms stabilization (prevents CPU blocking & power rail sag)
+    }
+
     uint32_t total = 0;
-    const int SAMPLES = 32;
+    const int SAMPLES = 16;
     for (int s = 0; s < SAMPLES; s++) {
         total += analogRead(pumps[index].sensorPin);
-        delayMicroseconds(100);
+        delayMicroseconds(50);
     }
+
+    if (pwrPin != -1) {
+        digitalWrite(pwrPin, LOW); // Cut power OFF to sensor VCC immediately after sampling
+    }
+
     return (int)(total / SAMPLES);
 }
 
@@ -1075,35 +1249,13 @@ void updatePumps() {
 // Uses memcmp content comparison to eliminate redundant flash erase/write cycles.
 
 void saveMotorConfig(int id) {
-    char key[16];
-    sprintf(key, "motor%d", id);
-
-    // Flash Wear Guard: Compare existing NVS data with new data; skip write if identical
-    MotorSettings existing;
-    memset(&existing, 0, sizeof(MotorSettings));
-    preferences.begin("plantpilot", true);
-    if (preferences.isKey(key)) {
-        preferences.getBytes(key, &existing, sizeof(MotorSettings));
-    }
-    preferences.end();
-
-    if (memcmp(&existing, &motorConfigs[id-1], sizeof(MotorSettings)) == 0) {
-        return; // Content is unchanged — skip NVS write to preserve flash health!
-    }
-
-    preferences.begin("plantpilot", false);
-    size_t written = preferences.putBytes(key, &motorConfigs[id-1], sizeof(MotorSettings));
-    preferences.end();
-    if (written == 0) Serial.printf("[NVS] WARNING: write failed for Pump %d\n", id);
-    else {
-        MotorSettings &c = motorConfigs[id-1];
-        Serial.printf("[%s] [NVS] Pump %d saved: enabled=%d auto=%d amount=%dml "
-            "threshold=%d%% interval=%dh rate=%dml/s dry=%d wet=%d "
-            "max_run=%dmin stop_disc=%d sched=%d v%d lm=%lu\n",
-            getLocalTimeStr(), id, c.isEnabled, c.autoMode, c.amountMl,
-            c.moistureThreshold, c.minIntervalHours, c.mlPerSecond,
-            c.calibrationDry, c.calibrationWet, c.maxRuntimeMinutes,
-            c.stopOnDisconnect, c.scheduleCount, c.version, c.lastModified);
+    markNvsDirty();
+    if (id >= 1 && id <= 4) {
+        MotorSettings &c = motorConfigs[id - 1];
+        Serial.printf("[%s] [NVS] Pump %d config updated in RAM -> Mode: %s | Water: %dml | Threshold: %d%% (Deferred Flash Save scheduled)\n",
+            getLocalTimeStr(), id,
+            !c.isEnabled ? "off" : (c.autoMode ? "auto" : "scheduled"),
+            c.amountMl, c.moistureThreshold);
     }
 }
 
@@ -1113,6 +1265,7 @@ void loadConfigs() {
     if (savedCadenceSec < 1 || savedCadenceSec > 30) savedCadenceSec = 3;
     streamCadenceMs = (unsigned long)savedCadenceSec * 1000UL;
     useHardwareWaterSensor = preferences.getBool("hw_sensor", true);
+    lowWaterBuzzIntervalMin = preferences.getInt("buzz_cadence", 15);
 
     for (int i = 1; i <= 4; i++) {
         char key[16]; sprintf(key, "motor%d", i);
@@ -1274,7 +1427,7 @@ void startSetupMode() {
     Serial.println("[SETUP] ==============================");
     dnsServer.start(53, "*", WiFi.softAPIP());
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(200, "text/html", String(FPSTR(SETUP_HTML)));
+        request->send_P(200, "text/html", SETUP_HTML);
     });
     server.on("/api/scan", HTTP_GET, [](AsyncWebServerRequest *request){
         int count = WiFi.scanComplete();
@@ -1303,7 +1456,7 @@ void startSetupMode() {
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
         preferences.begin("wifi", false); preferences.putString("ssid", request->arg("ssid")); preferences.putString("pass", request->arg("pass")); preferences.end();
         WiFi.begin(request->arg("ssid").c_str(), request->arg("pass").c_str());
-        request->send(200, "text/html", String(FPSTR(CONNECTING_HTML)));
+        request->send_P(200, "text/html", CONNECTING_HTML);
         pendingRestart = true; restartTime = millis() + 30000;
     });
     server.onNotFound([](AsyncWebServerRequest *request){ request->redirect("/"); });
@@ -1318,7 +1471,7 @@ void startSetupMode() {
 // Reused small response doc + buffer (ok / pump state ACKs) to keep the WS
 // event-task path free of per-message heap alloc/free churn.
 static JsonDocument respDoc;
-static char respBuf[2048]; // Increased to 2048 for full STATUS payloads
+static char respBuf[4096]; // Expanded to 4096 bytes to prevent STATUS payload truncation
 
 // Deferred command state to avoid race conditions between WS task and main loop
 volatile bool pendingStatusRequest = false;
@@ -1342,7 +1495,7 @@ void sendOkResponse(AsyncWebSocketClient *client, const String& cmd, bool withPu
 // overflow in the AsyncTCP task and to utilize the larger respBuf.
 void sendStatusResponse() {
     if (ws.count() == 0) return;
-    readHardwareWaterLevel();
+    pendingSensorRead = true; // Defer hardware reading to main loop
     respDoc.clear();
     JsonDocument &doc = respDoc;
     doc["type"] = "status";
@@ -1351,6 +1504,7 @@ void sendStatusResponse() {
     doc["low_water_buzz_cadence_min"] = lowWaterBuzzIntervalMin;
     doc["water_level"] = waterLevel;
     doc["water_level_raw"] = waterLevelDiscrete;
+    doc["use_hw_sensor"] = useHardwareWaterSensor;
     JsonArray pumpsArr = doc["pumps"].to<JsonArray>();
     for (int i = 0; i < 4; i++) pumpsArr.add(pumps[i].isOn || startQueue[i].pending);
     JsonArray motors = doc["motors"].to<JsonArray>();
@@ -1378,20 +1532,28 @@ void sendStatusResponse() {
             s["minute"] = motorConfigs[i].schedules[j].minute;
         }
     }
-    serializeJson(doc, respBuf, sizeof(respBuf));
+    size_t jsonSize = serializeJson(doc, respBuf, sizeof(respBuf));
+    if (jsonSize >= sizeof(respBuf)) {
+        Serial.printf("[%s] [ERR] STATUS payload truncated (%u bytes)\n", getLocalTimeStr(), (unsigned)jsonSize);
+        return;
+    }
     ws.textAll(respBuf); // Targeted response to everyone (safe for app)
+    Serial.printf("[%s] [WS] TX: STATUS payload sent (%u bytes)\n", getLocalTimeStr(), (unsigned)jsonSize);
 }
 
 void sendWsRaw(AsyncWebSocketClient *client, const char* payload) {
+    if (payload == nullptr) return;
+    size_t len = strlen(payload);
+    if (len <= 128) {
+        Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr(), payload);
+    } else {
+        Serial.printf("[%s] [WS] TX: payload (%u bytes)\n", getLocalTimeStr(), (unsigned)len);
+    }
     if (client == nullptr || client->status() != WS_CONNECTED) {
         ws.textAll(payload);
         return;
     }
-    Serial.printf("[%s] [WS] TX: %s\n", getLocalTimeStr(), payload);
     size_t sent = client->text(payload);
-    // AsyncWebSocketClient::text returns 0 when the message was dropped
-    // (send buffer full / no space). Surface that in serial so a silent link
-    // stall is visible; a stalled client here is what the app sees as a reset.
     if (sent == 0) {
         Serial.printf("[%s] [WS] WARN: text() returned 0 (client stalled or out of memory)\n",
             getLocalTimeStr());
@@ -1401,10 +1563,12 @@ void sendWsRaw(AsyncWebSocketClient *client, const char* payload) {
 void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
     cmd.trim();
     lastClientCommandMs = millis(); // Track client liveness
-    if (cmd.length() > 128) {
-        Serial.printf("[%s] [WS] RX: %s... (length: %d chars)\n", getLocalTimeStr(), cmd.substring(0, 128).c_str(), cmd.length());
-    } else {
-        Serial.printf("[%s] [WS] RX: %s\n", getLocalTimeStr(), cmd.c_str());
+    if (cmd != "PING") {
+        if (cmd.length() > 128) {
+            Serial.printf("[%s] [WS] RX: %s... (length: %d chars)\n", getLocalTimeStr(), cmd.substring(0, 128).c_str(), cmd.length());
+        } else {
+            Serial.printf("[%s] [WS] RX: %s\n", getLocalTimeStr(), cmd.c_str());
+        }
     }
     if (cmd == "READ_SENSORS") {
         Serial.printf("[%s] [APP] Sensor read & live telemetry requested by App\n", getLocalTimeStr());
@@ -1419,6 +1583,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         streamCadenceMs = (unsigned long)seconds * 1000UL;
         if (seconds != savedCadenceSec) {
             savedCadenceSec = seconds;
+            markNvsDirty();
             Serial.printf("[%s] [SYNC] App Lifecycle -> Telemetry cadence set to %ds (%s mode)\n",
                 getLocalTimeStr(), seconds, seconds == 1 ? "FOREGROUND" : "BACKGROUND");
         }
@@ -1439,6 +1604,7 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         if (minutes < 0) minutes = 0;
         if (minutes > 120) minutes = 120;
         lowWaterBuzzIntervalMin = minutes;
+        markNvsDirty();
         Serial.printf("[%s] [BUZZER] Low water alarm repeat cadence updated -> %d minutes\n", getLocalTimeStr(), minutes);
         JsonDocument okDoc;
         char localBuf[256];
@@ -1449,14 +1615,12 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         sendWsRaw(client, localBuf);
     } else if (cmd == "DEMO_MODE_ON") {
         demoModeActive = true;
-        readHardwareWaterLevel();
-        broadcastTelemetry();
+        pendingSensorRead = true; // Defer hardware reading & telemetry broadcast to the main loop task (Core 1)
         Serial.printf("[%s] [MODE] Demo Mode -> ENABLED (3s cadence, dry-run safety bypassed)\n", getLocalTimeStr());
         sendOkResponse(client, cmd, false);
     } else if (cmd == "DEMO_MODE_OFF") {
         demoModeActive = false;
-        readHardwareWaterLevel();
-        broadcastTelemetry();
+        pendingSensorRead = true; // Defer to main loop
         Serial.printf("[%s] [MODE] Demo Mode -> DISABLED (Normal operation)\n", getLocalTimeStr());
         sendOkResponse(client, cmd, false);
     } else if (cmd == "CAL_STREAM_ON") {
@@ -1469,12 +1633,12 @@ void handleWsCommand(String cmd, AsyncWebSocketClient *client) {
         sendOkResponse(client, cmd, false);
     } else if (cmd == "HW_WATER_SENSOR_ON") {
         saveHwWaterSensorSetting(true);
-        readHardwareWaterLevel();
-        broadcastTelemetry();
+        pendingSensorRead = true; // Defer to main loop
         Serial.printf("[%s] [WATER_SENSOR] Hardware Water Sensor -> ENABLED (GPIO 16,17,18,19 active)\n", getLocalTimeStr());
         sendOkResponse(client, cmd, false);
     } else if (cmd == "HW_WATER_SENSOR_OFF") {
         saveHwWaterSensorSetting(false);
+        pendingSensorRead = true; // Defer to main loop
         Serial.printf("[%s] [WATER_SENSOR] Hardware Water Sensor -> DISABLED (Software history mode active)\n", getLocalTimeStr());
         sendOkResponse(client, cmd, false);
     } else if (cmd == "TELEMETRY_PAUSE") {
@@ -1620,7 +1784,7 @@ void setupApi() {
         if (doc["water_level"].is<int>()) {
             waterLevel = constrain((int)doc["water_level"], 0, 100);
         }
-        readHardwareWaterLevel(); // Always re-evaluate hardware sensor pins
+        pendingSensorRead = true; // Defer hardware reading to main loop
 
         JsonArray motors = doc["motors"];
         JsonDocument response;
@@ -1821,19 +1985,6 @@ const char* getWifiReasonStr(uint8_t reason) {
 //  SECTION 12: WEBSOCKET EVENT DISPATCHER & COMMAND PARSER
 // =====================================================================================
 
-// Wi-Fi Performance Mode: modem sleep is never enabled on this device.
-// WIFI_PS_MIN_MODEM causes ESP32 radio sleep cycles that drop incoming TCP/WS pings.
-// WiFi.setSleep(false) is called once at connect time; this helper is kept only
-// as a log point for diagnostics (e.g. to confirm performance mode is active).
-static unsigned long pendingModemSleepEnableMs = 0;
-
-void setDynamicModemSleep(bool /*enableSleep*/, const char* reason) {
-    WiFi.setSleep(false); // Always performance mode — modem sleep intentionally disabled
-    pendingModemSleepEnableMs = 0;
-    Serial.printf("[%s] [WIFI] Performance mode enforced (%s) — Wi-Fi modem sleep OFF\n",
-        getLocalTimeStr(), reason);
-}
-
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_CONNECTED:
@@ -1847,8 +1998,7 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
                 WiFi.gatewayIP().toString().c_str(),
                 (int)WiFi.RSSI());
             wasConnected = true;
-            // Maintain continuous performance mode (0ms latency) for instant app connection
-            setDynamicModemSleep(false, "WiFi GOT_IP Connected");
+            WiFi.setSleep(false); // Maintain continuous active radio (0ms latency, zero modem sleep)
             if (pendingRestart) { restartTime = millis() + 10000; }
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -1867,6 +2017,8 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 // =====================================================================================
 
 void setup() {
+    setCpuFrequencyMhz(160); // Optimize thermal power consumption (160MHz reduces core heat by ~30%)
+    sensorMutex = xSemaphoreCreateRecursiveMutex();
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=============================================");
@@ -1893,7 +2045,7 @@ void setup() {
     Serial.printf("[SYSTEM] Flash Memory      : %u KB @ %u MHz\n",
         ESP.getFlashChipSize() / 1024, ESP.getFlashChipSpeed() / 1000000);
     Serial.printf("[SYSTEM] MAC Address       : %s\n", WiFi.macAddress().c_str());
-    Serial.printf("[SYSTEM] Initial Free Heap : %u bytes (Min: %u bytes)\n",
+    Serial.printf("[SYSTEM] Initial Free RAM : %u bytes (Min: %u bytes)\n",
         ESP.getFreeHeap(), ESP.getMinFreeHeap());
     Serial.println("=============================================\n");
     initStatusLed(); initButton(); initRelays(); initBuzzer(); loadConfigs(); initChannelPolling();
@@ -1910,20 +2062,17 @@ void setup() {
         Serial.printf("[TIME] Boot epoch offset: %lu (persisted epoch %lu)\n", bootEpochOffset, timeData.epoch);
     }
 
-    WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
-    setDynamicModemSleep(true, "Setup Standby");
-    preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
+            WiFi.persistent(false); WiFi.setAutoReconnect(true); WiFi.onEvent(onWiFiEvent);
+            WiFi.setSleep(false); // Permanently disable Wi-Fi Modem Sleep
+            preferences.begin("wifi", true); String ssid = preferences.getString("ssid", ""); String pass = preferences.getString("pass", ""); preferences.end();
     if (ssid.length() > 0) { Serial.printf("[%s] [WIFI] Target: %s\n", getLocalTimeStr(), ssid.c_str()); WiFi.begin(ssid.c_str(), pass.c_str()); }
     else { Serial.printf("[%s] [WIFI] No credentials. Setup Mode.\n", getLocalTimeStr()); startSetupMode(); }
     if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
     setupApi();
     ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len){
         if (type == WS_EVT_CONNECT) {
-            Serial.printf("[%s] [WS] Client connected (ip: %s, total: %u, heap: %u)\n",
+            Serial.printf("[%s] [WS] Client connected (ip: %s, total: %u, free_ram: %u)\n",
                 getLocalTimeStr(), client->remoteIP().toString().c_str(), ws.count(), ESP.getFreeHeap());
-            
-            // Instantly disable modem sleep for 0ms sub-millisecond socket performance
-            setDynamicModemSleep(false, "App client connected");
 
             client->text("PlantPilot Ready");
             Serial.println("[WS] TX: PlantPilot Ready");
@@ -1942,9 +2091,6 @@ void setup() {
                 getLocalTimeStr(), ws.count());
             // If all clients disconnected and any pump has stopOnDisconnect, queue a stop
             if (ws.count() == 0) {
-                // Schedule modem sleep to re-enable after a 5-second grace period
-                pendingModemSleepEnableMs = millis() + 5000UL;
-
                 for (int i = 0; i < 4; i++) {
                     if (motorConfigs[i].stopOnDisconnect && pumps[i].isOn) {
                         Serial.printf("[%s] [PUMP] Stopping %s on disconnect (stopOnDisconnect=true)\n",
@@ -1976,13 +2122,11 @@ void loop() {
     updateBuzzer();
     checkLowWaterBuzzer();
 
-    // Dynamic Wi-Fi Modem Sleep Grace Timer:
-    // When all WebSocket clients disconnect, wait 5 seconds before returning to power-saving modem sleep.
-    if (pendingModemSleepEnableMs > 0 && loopStart >= pendingModemSleepEnableMs) {
-        pendingModemSleepEnableMs = 0;
-        if (ws.count() == 0) {
-            setDynamicModemSleep(true, "App closed / no active clients");
-        }
+    // Deferred NVS Flash Batch Persistence:
+    // Flushes queued RAM setting updates to NVS flash 1s after settings stop changing,
+    // ensuring zero SPI flash write lockouts during network WS/REST request handling.
+    if (pendingNvsSave && loopStart >= nvsSaveDueMs) {
+        flushNvsConfigs();
     }
 
     // 1. Process Global Start Queue (Power Safety - Non-blocking)
@@ -2048,11 +2192,11 @@ void loop() {
                 didRadioReset = true;
             }
         }
-        // 3. Simple begin retry at 1min (faster recovery for minor glitches)
-        else if (offlineMs > 60000UL) {
+        // 3. Fallback begin retry at 5min (prevents interrupting auto-reconnect)
+        else if (offlineMs > 300000UL) {
             static unsigned long lastBeginRetry = 0;
-            if (loopStart - lastBeginRetry > 60000UL) {
-                Serial.println("[WIFI] Offline 1min, retrying begin...");
+            if (loopStart - lastBeginRetry > 300000UL) {
+                Serial.println("[WIFI] Offline 5min, retrying begin...");
                 WiFi.begin();
                 lastBeginRetry = loopStart;
             }
@@ -2067,9 +2211,12 @@ void loop() {
     }
     if (setupModeActive) dnsServer.processNextRequest();
 
-    // Clean up dead TCP clients (only removes already-disconnected sockets,
-    // does not timeout alive connections).
-    ws.cleanupClients();
+    // Throttled WebSocket dead client cleanup (every 2 seconds to avoid socket tearing mid-flight)
+    static unsigned long lastWsCleanupMs = 0;
+    if (loopStart - lastWsCleanupMs >= 2000UL) {
+        lastWsCleanupMs = loopStart;
+        ws.cleanupClients(2);
+    }
 
     // Low-heap guard: logs once per threshold crossing and triggers a protective
     // restart if the heap stays critically low for too long (5 minutes).
@@ -2087,13 +2234,13 @@ void loop() {
             if (!heapWarned || (loopStart - lastLowHeapLog > 60000)) {
                 heapWarned = true;
                 lastLowHeapLog = loopStart;
-                Serial.printf("[%s] [SYS] WARNING: critical heap (free=%u, largest=%u)\n",
+                Serial.printf("[%s] [SYS] WARNING: critical free RAM (free=%u, largest=%u)\n",
                     getLocalTimeStr(), (unsigned)freeHeap, (unsigned)largest);
             }
 
             // Protective restart after 5 minutes of persistent critical low heap
             if (loopStart - criticalHeapStart > 300000UL) {
-                Serial.println("[SYS] FATAL: Heap critical for 5min. Restarting for health.");
+                Serial.println("[SYS] FATAL: Free RAM critical for 5min. Restarting for health.");
                 ESP.restart();
             }
         } else {

@@ -39,10 +39,19 @@ class TelemetryProcessor(
     private val SNAPSHOT_SAVE_INTERVAL_MS = 2000L
 
     fun applyTelemetry(status: DeviceStatusResponse) {
+        status.use_hw_sensor?.let { devEnabled ->
+            if (devEnabled != settings.value.useHardwareWaterSensor) {
+                scope.launch {
+                    val updated = settings.value.copy(useHardwareWaterSensor = devEnabled)
+                    settingsManager.saveAppSettings(updated)
+                }
+            }
+        }
+
         val capacity = deviceStateFlow.value.tankCapacityMl.coerceAtLeast(100)
         val currentEstimatedMl = deviceStateFlow.value.estimatedWaterMl
         val isDemo = settings.value.demoMode || status.demo_mode == true
-        val hardwareDiscrete = if (settings.value.useHardwareWaterSensor || isDemo) {
+        val hardwareDiscrete = if ((status.use_hw_sensor ?: settings.value.useHardwareWaterSensor) || isDemo) {
             status.water_level_raw ?: (if (status.water_level >= 0) status.water_level / 25 else null)
         } else {
             null // Completely ignore unattached hardware NPN sensor pin noise!
@@ -79,7 +88,7 @@ class TelemetryProcessor(
         plantsFlow.update { currentList ->
             currentList.map { plant ->
                 val rawAdc = status.raw_soil?.getOrNull(plant.motorNumber - 1)
-                val moisture = if (rawAdc != null && plant.dryCalibration > 0 && plant.wetCalibration > 0) {
+                val moisture = if (rawAdc != null && plant.dryCalibration > 0 && plant.wetCalibration > 0 && plant.dryCalibration > plant.wetCalibration) {
                     val dry = plant.dryCalibration
                     val wet = plant.wetCalibration
                     val range = (wet - dry).toFloat()

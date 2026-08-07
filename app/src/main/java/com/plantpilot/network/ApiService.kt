@@ -20,6 +20,7 @@ data class DeviceStatusResponse(
     val pumps: List<Boolean>? = null,
     val queued: List<Boolean>? = null,
     val sensor_cadence_sec: Int? = null,
+    val use_hw_sensor: Boolean? = null,
     val motors: List<DeviceMotorConfig>? = null
 )
 

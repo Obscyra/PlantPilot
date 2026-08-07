@@ -204,11 +204,9 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 val justReconnected = reachable && !wasPreviouslyConnected
                 wasPreviouslyConnected = reachable
                 _deviceState.update { it.copy(isConnected = reachable) }
-                if (justReconnected) {
-                    val cmd = if (_settings.value.useHardwareWaterSensor) "HW_WATER_SENSOR_ON" else "HW_WATER_SENSOR_OFF"
-                    hardwareRepository.sendCommand(cmd)
-                    // Two-way sync: pull whatever is newer on the device, push what's newer here.
-                    syncCoordinator.performTwoWaySync()
+                if (justReconnected && isConfigDirty.value) {
+                    // Push queued local config updates if user made edits while offline
+                    syncCoordinator.syncConfigWithDevice(silent = true)
                 }
             }
         }
@@ -243,16 +241,6 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 _settings.value = newSettings
                 if (hardwareRepository.connectionState.value == ConnectionState.Connected && prevDemo != newSettings.demoMode) {
                     hardwareRepository.sendCommand(if (newSettings.demoMode) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            hardwareRepository.connectionState.collect { state ->
-                if (state == ConnectionState.Connected) {
-                    val settings = settingsManager.appSettingsFlow.first()
-                    hardwareRepository.sendCommand(if (settings.demoMode) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
-                    hardwareRepository.sendCommand("BUZZ_CADENCE ${settings.lowWaterBuzzCadenceMin}")
                 }
             }
         }
@@ -502,19 +490,23 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         } finally {
             hardwareRepository.setWateringInProgress(false)
             _isWateringPlantId.value = null
-            notificationHelper.showWateringFinished(plant.name)
-            val event = WateringEvent(
-                id = UUID.randomUUID().toString(),
-                plantId = plant.id,
-                plantName = plant.name,
-                motorNumber = plant.motorNumber,
-                amountMl = plant.waterAmountMl,
-                triggerType = TriggerType.MANUAL,
-                timestamp = startTime,
-                moistureBefore = plant.currentMoisture,
-                moistureAfter = plant.currentMoisture
-            )
-            historyManager.addHistoryEvent(event)
+            // HardwareEvent.WateringFinished collector receives completion from ESP32 when connected.
+            // Fallback to local notification & history entry only when offline / REST mode.
+            if (hardwareRepository.connectionState.value != ConnectionState.Connected) {
+                notificationHelper.showWateringFinished(plant.name)
+                val event = WateringEvent(
+                    id = UUID.randomUUID().toString(),
+                    plantId = plant.id,
+                    plantName = plant.name,
+                    motorNumber = plant.motorNumber,
+                    amountMl = plant.waterAmountMl,
+                    triggerType = TriggerType.MANUAL,
+                    timestamp = startTime,
+                    moistureBefore = plant.currentMoisture,
+                    moistureAfter = plant.currentMoisture
+                )
+                historyManager.addHistoryEvent(event)
+            }
         }
         return true
     }

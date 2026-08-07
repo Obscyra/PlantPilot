@@ -214,7 +214,7 @@ class HardwareRepository : HardwareConnection {
                 if (requestedCadenceSec > 0) {
                     sendCommand("SYNC_MODE $requestedCadenceSec")
                 }
-                sendCommand("STATUS")
+                sendCommand("PING")   // Motors[] config arrives in first telemetry frame (motorsLastSentMs=0 set on WS_EVT_CONNECT)
                 startHeartbeat()
             }
 
@@ -316,8 +316,8 @@ class HardwareRepository : HardwareConnection {
                 val staleInterval = if (isBackgrounded) 45000L else 30000L
                 val timeSinceLastSent = now - lastCommandSentTime
                 if (timeSinceLastSent >= staleInterval) {
-                    // Use minimal PING to reset timer without heavy payload
-                    sendCommand(if (isBackgrounded) "PING" else "STATUS")
+                    // Use minimal PING to reset ESP32 idle timer without heavy payload
+                    sendCommand("PING")
                 }
 
                 // 2. Link Liveness Check: If we haven't RECEIVED anything, the link might be dead.
@@ -333,7 +333,7 @@ class HardwareRepository : HardwareConnection {
                     } else {
                         if (probeOutstanding) missedProbes++
                         // Use minimal PING for routine heartbeat
-                        sendCommand(if (isBackgrounded) "PING" else "STATUS")
+                        sendCommand("PING")
                         lastHeartbeatSentTime = now
                     }
                 }

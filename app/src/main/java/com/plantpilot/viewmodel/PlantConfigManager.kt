@@ -46,8 +46,10 @@ class PlantConfigManager(
         }
     }
 
+    private var persistJob: kotlinx.coroutines.Job? = null
+
     fun updateWateringAmount(plantId: String, amountMl: Int) {
-        updatePlant(plantId, autoSync = true) { it.copy(waterAmountMl = amountMl.coerceIn(10, 100)) }
+        updatePlant(plantId, autoSync = true) { it.copy(waterAmountMl = amountMl.coerceIn(10, 10000)) }
     }
 
     fun updatePlantName(plantId: String, name: String) {
@@ -101,7 +103,9 @@ class PlantConfigManager(
     }
 
     fun persistPlants() {
-        scope.launch {
+        persistJob?.cancel()
+        persistJob = scope.launch {
+            kotlinx.coroutines.delay(300L)
             settingsManager.savePlants(plantsFlow.value)
         }
     }
