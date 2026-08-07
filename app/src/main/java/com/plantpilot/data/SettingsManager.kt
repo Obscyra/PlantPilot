@@ -68,7 +68,7 @@ class SettingsManager(private val context: Context) {
             pumpFlowRateMlPerSec = prefs[PUMP_FLOW_RATE] ?: 10,
             demoMode = prefs[DEMO_MODE] ?: false,
             lowWaterBuzzCadenceMin = prefs[LOW_WATER_BUZZ_CADENCE] ?: 15,
-            useHardwareWaterSensor = prefs[USE_HARDWARE_WATER_SENSOR] ?: false
+            useHardwareWaterSensor = prefs[USE_HARDWARE_WATER_SENSOR] ?: true
         )
     }
 

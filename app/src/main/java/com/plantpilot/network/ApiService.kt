@@ -9,6 +9,7 @@ import retrofit2.http.*
 data class DeviceStatusResponse(
     val water_level: Int,
     val water_level_raw: Int? = null,
+    val demo_mode: Boolean? = null,
     val soil: List<Int>,
     val wifi_rssi: Int,
     val wifi_ssid: String? = null,

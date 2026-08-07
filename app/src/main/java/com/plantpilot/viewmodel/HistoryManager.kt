@@ -25,15 +25,21 @@ class HistoryManager(
     private val notificationHelper: NotificationHelper,
     private val onWateringFinished: (motorNumber: Int) -> Unit,
     private val onWaterUsed: (amountMl: Int) -> Unit = {},
+    private val persistPlants: () -> Unit = {},
 ) {
     fun addHistoryEvent(event: WateringEvent) {
+        // Deduplicate: if an event for the same motor within 3000ms exists, skip
+        if (historyFlow.value.any { it.motorNumber == event.motorNumber && kotlin.math.abs(it.timestamp - event.timestamp) < 3000L }) {
+            return
+        }
+
         historyFlow.update { current ->
             (listOf(event) + current)
                 .distinctBy { "${it.motorNumber}_${it.timestamp}" }
                 .sortedByDescending { it.timestamp }
                 .take(50)
         }
-        
+
         scope.launch {
             settingsManager.saveHistory(historyFlow.value)
         }
@@ -42,22 +48,28 @@ class HistoryManager(
         onWaterUsed(event.amountMl)
 
         // Also update the plant's last watered timestamp
+        var updatedPlant = false
         plantsFlow.update { currentList ->
-            currentList.map {
-                if (it.id == event.plantId) {
-                    it.copy(
-                        lastWateredTimestamp = event.timestamp,
-                        currentMoisture = event.moistureAfter ?: it.currentMoisture
+            currentList.map { plant ->
+                if (plant.id == event.plantId || plant.motorNumber == event.motorNumber) {
+                    updatedPlant = true
+                    plant.copy(
+                        lastWateredTimestamp = maxOf(plant.lastWateredTimestamp, event.timestamp),
+                        currentMoisture = event.moistureAfter ?: plant.currentMoisture
                     )
-                } else it
+                } else plant
             }
+        }
+
+        if (updatedPlant) {
+            persistPlants()
         }
 
         // Complete any pending watering deferred for this motor
         onWateringFinished(event.motorNumber)
 
         // Show notification if it was a finished event we just received
-        val plant = plantsFlow.value.find { it.id == event.plantId }
+        val plant = plantsFlow.value.find { it.id == event.plantId || it.motorNumber == event.motorNumber }
         if (plant != null) {
             notificationHelper.showWateringFinished(plant.name)
         }
@@ -67,8 +79,8 @@ class HistoryManager(
         val plant = plantsFlow.value.find { it.motorNumber == event.motor } ?: return
         val timestamp = if (event.epoch > 0) event.epoch * 1000L else System.currentTimeMillis()
 
-        // Check if we already have this event in history (deduplication by motor & 2s time window)
-        if (historyFlow.value.any { it.motorNumber == event.motor && kotlin.math.abs(it.timestamp - timestamp) < 2000L }) return
+        // Check if we already have this event in history (deduplication by motor & 3s time window)
+        if (historyFlow.value.any { it.motorNumber == event.motor && kotlin.math.abs(it.timestamp - timestamp) < 3000L }) return
 
         val newEvent = WateringEvent(
             id = UUID.randomUUID().toString(),
@@ -86,14 +98,5 @@ class HistoryManager(
             moistureAfter = event.soil_after
         )
         addHistoryEvent(newEvent)
-
-        // Update the plant's UI state if this is the newest watering we've seen
-        if (timestamp > plant.lastWateredTimestamp) {
-            plantsFlow.update { currentList ->
-                currentList.map { p ->
-                    if (p.id == plant.id) p.copy(lastWateredTimestamp = timestamp) else p
-                }
-            }
-        }
     }
 }

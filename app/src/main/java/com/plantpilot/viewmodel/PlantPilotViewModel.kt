@@ -137,6 +137,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             }
             viewModelScope.launch { settingsManager.saveDeviceState(_deviceState.value) }
         },
+        persistPlants = { configManager.persistPlants() },
     )
 
     private val syncCoordinator: SyncCoordinator = SyncCoordinator(
@@ -204,6 +205,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                 wasPreviouslyConnected = reachable
                 _deviceState.update { it.copy(isConnected = reachable) }
                 if (justReconnected) {
+                    val cmd = if (_settings.value.useHardwareWaterSensor) "HW_WATER_SENSOR_ON" else "HW_WATER_SENSOR_OFF"
+                    hardwareRepository.sendCommand(cmd)
                     // Two-way sync: pull whatever is newer on the device, push what's newer here.
                     syncCoordinator.performTwoWaySync()
                 }
@@ -220,8 +223,8 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                         wifiSsid = partial.ssid,
                         tankCapacityMl = partial.capacity,
                         lowWaterThreshold = partial.threshold,
-                        // Fresh install has no persisted estimate -> assume full tank.
-                        estimatedWaterMl = partial.estimatedWaterMl ?: partial.capacity
+                        // Preserve live in-memory estimated water volume so DataStore emissions do not clobber live hardware sensor telemetry
+                        estimatedWaterMl = if (current.estimatedWaterMl > 0) current.estimatedWaterMl else (partial.estimatedWaterMl ?: partial.capacity)
                     )
                 }
                 NetworkModule.updateBaseUrl(partial.ip)
@@ -235,15 +238,21 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            settingsManager.appSettingsFlow.collect { _settings.value = it }
+            settingsManager.appSettingsFlow.collect { newSettings ->
+                val prevDemo = _settings.value.demoMode
+                _settings.value = newSettings
+                if (hardwareRepository.connectionState.value == ConnectionState.Connected && prevDemo != newSettings.demoMode) {
+                    hardwareRepository.sendCommand(if (newSettings.demoMode) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
+                }
+            }
         }
 
         viewModelScope.launch {
             hardwareRepository.connectionState.collect { state ->
                 if (state == ConnectionState.Connected) {
-                    val isDemo = _settings.value.demoMode
-                    hardwareRepository.sendCommand(if (isDemo) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
-                    hardwareRepository.sendCommand("BUZZ_CADENCE ${_settings.value.lowWaterBuzzCadenceMin}")
+                    val settings = settingsManager.appSettingsFlow.first()
+                    hardwareRepository.sendCommand(if (settings.demoMode) "DEMO_MODE_ON" else "DEMO_MODE_OFF")
+                    hardwareRepository.sendCommand("BUZZ_CADENCE ${settings.lowWaterBuzzCadenceMin}")
                 }
             }
         }
@@ -253,7 +262,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             val saved = settingsManager.plantsFlow.first()
             val hasMigratedV2 = settingsManager.plantsMigratedV2Flow.first()
 
-            if (saved != null) {
+            val basePlants = if (saved != null) {
                 if (!hasMigratedV2) {
                     // One-time migration of default plant names for existing installs
                     val migrated = saved.map { plant ->
@@ -268,13 +277,20 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
                             }
                         } else plant
                     }
-                    _plants.update { migrated }
                     settingsManager.savePlants(migrated)
                     settingsManager.savePlantsMigratedV2(true)
+                    migrated
                 } else {
-                    // Already migrated once: preserve user's edited plant names exact as saved
-                    _plants.update { saved }
+                    saved
                 }
+            } else {
+                MockData.generatePlants()
+            }
+
+            val reconciled = reconcilePlantsWithHistory(basePlants, _history.value)
+            _plants.update { reconciled }
+            if (reconciled != saved) {
+                configManager.persistPlants()
             }
             // Once the first real hydration is done, clear the loading flag.
             // This prevents the "flash of empty mocks" on startup.
@@ -289,7 +305,16 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            settingsManager.historyFlow.collect { _history.value = it }
+            settingsManager.historyFlow.collect { historyList ->
+                _history.value = historyList
+                _plants.update { current ->
+                    val reconciled = reconcilePlantsWithHistory(current, historyList)
+                    if (reconciled != current) {
+                        configManager.persistPlants()
+                    }
+                    reconciled
+                }
+            }
         }
 
         // Observe hardware events (History tracking)
@@ -419,7 +444,7 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * Enables/disables the realtime 1s raw-sensor stream used by the
+     * Enables/disables the realtime 3s raw-sensor stream used by the
      * calibration sheet. Send CAL_STREAM_ON while the sheet is open so the
      * user sees live raw ADC values; send CAL_STREAM_OFF when it closes.
      */
@@ -446,6 +471,11 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
             _commandBlockedEvents.trySend("Can't water — device offline")
             return false
         }
+        // Refuse when water tank is empty in Normal Mode (Demo Mode bypasses for live testing)
+        if (!_settings.value.demoMode && (_deviceState.value.waterTankLevel == 0 || _deviceState.value.estimatedWaterMl == 0)) {
+            _commandBlockedEvents.trySend("Water tank is empty! Refill tank before watering.")
+            return false
+        }
         val plant = _plants.value.find { it.id == plantId } ?: return false
 
         // Start watering animation IMMEDIATELY on click for instantaneous UI response
@@ -466,12 +496,25 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         // Keep animation active for exactly 5 seconds
+        val startTime = System.currentTimeMillis()
         try {
             delay(5000L)
         } finally {
             hardwareRepository.setWateringInProgress(false)
             _isWateringPlantId.value = null
             notificationHelper.showWateringFinished(plant.name)
+            val event = WateringEvent(
+                id = UUID.randomUUID().toString(),
+                plantId = plant.id,
+                plantName = plant.name,
+                motorNumber = plant.motorNumber,
+                amountMl = plant.waterAmountMl,
+                triggerType = TriggerType.MANUAL,
+                timestamp = startTime,
+                moistureBefore = plant.currentMoisture,
+                moistureAfter = plant.currentMoisture
+            )
+            historyManager.addHistoryEvent(event)
         }
         return true
     }
@@ -564,6 +607,10 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
     fun setUseHardwareWaterSensor(enabled: Boolean) {
         updateSettings { it.copy(useHardwareWaterSensor = enabled) }
         hardwareRepository.logUserAction("Settings: Hardware Water Sensor → ${if (enabled) "ON" else "OFF (Pure Software History)"}")
+        viewModelScope.launch {
+            val cmd = if (enabled) "HW_WATER_SENSOR_ON" else "HW_WATER_SENSOR_OFF"
+            hardwareRepository.sendCommand(cmd)
+        }
     }
 
     fun setEstimatedWaterMl(ml: Int) {
@@ -670,5 +717,21 @@ class PlantPilotViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             settingsManager.saveAppSettings(newSettings)
         }
+    }
+
+    private fun reconcilePlantsWithHistory(plantsList: List<Plant>, historyList: List<WateringEvent>): List<Plant> {
+        if (historyList.isEmpty()) return plantsList
+        var changed = false
+        val updatedList = plantsList.map { plant ->
+            val plantEvents = historyList.filter { it.plantId == plant.id || it.motorNumber == plant.motorNumber }
+            val maxHistoryTimestamp = plantEvents.maxOfOrNull { it.timestamp } ?: 0L
+            if (maxHistoryTimestamp > plant.lastWateredTimestamp) {
+                changed = true
+                plant.copy(lastWateredTimestamp = maxHistoryTimestamp)
+            } else {
+                plant
+            }
+        }
+        return if (changed) updatedList else plantsList
     }
 }

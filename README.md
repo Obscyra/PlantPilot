@@ -84,6 +84,11 @@
 | 35 | Soil moisture sensor 2 (ADC) |
 | 32 | Soil moisture sensor 3 (ADC) |
 | 33 | Soil moisture sensor 4 (ADC) |
+| 16 | Water level sensor probe L1 (25% level, 330Ω resistor, active-low) |
+| 17 | Water level sensor probe L2 (50% level, 330Ω resistor, active-low) |
+| 18 | Water level sensor probe L3 (75% level, 330Ω resistor, active-low) |
+| 19 | Water level sensor probe L4 (100% level, 330Ω resistor, active-low) |
+| 21 | Piezo Buzzer (alarm beeps) |
 | 2 | On-board status LED (built-in) |
 
 Soil moisture raw ADC is 12-bit (0–4095). Each sensor maps to a 0–100% reading using its own stored dry/wet calibration points: `map(raw, calibrationDry, calibrationWet, 0, 100)`. Before calibration the firmware uses default points (dry 4095, wet 1000).
@@ -151,7 +156,7 @@ Messages from the app (commands):
 | `STATUS` | Request current pump states |
 | `READ_SENSORS` | Force an immediate sensor read + telemetry push |
 | `SYNC_MODE <sec>` | Set telemetry cadence (app lifecycle: 1s foreground / 3s background, clamped 1–30) |
-| `CAL_STREAM_ON` / `CAL_STREAM_OFF` | Toggle real-time calibration sensor streaming (1s) |
+| `CAL_STREAM_ON` / `CAL_STREAM_OFF` | Toggle real-time calibration sensor streaming (3s) |
 | `PUMP{A–D}_ON` / `PUMP{A–D}_OFF` | Toggle a single pump (Mutually Exclusive: turning one ON stops any other) |
 | `PUMP_ALL_OFF` | Stop all pumps immediately |
 | `RESET_CONFIG` | Wipe NVS config back to defaults |
@@ -181,7 +186,7 @@ Messages from the device:
 
 ### Power & Resilience
 
-- `WiFi.setSleep(WIFI_PS_MIN_MODEM)` — light modem sleep keeps reconnects near-instant.
+- `WiFi.setSleep(false)` — modem sleep disabled (performance mode) to ensure continuous 0ms-latency connectivity and prevent Wi-Fi dropping.
 - Telemetry cadence: **1s** foreground / **3s** background with a WebSocket client, **60s** when idle; `broadcastTelemetry()` early-returns when `ws.count() == 0`.
 - **Logical sensor-off:** while disconnected, no sensors are read by the dashboard path. Only plants with auto-watering enabled get a fresh per-plant sensor read every **10 min** just before their watering decision; all other sensors stay logically off.
 - **WiFi recovery:** escalating resilience — radio disconnect + reconnect after 10 min offline, full restart after 30 min.

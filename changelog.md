@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1] - 2026-08-07
+
+### Fixed
+- Hardware water level probe sensing: Updated GPIO 16, 17, 18, 19 with 330Ω resistors to use `INPUT_PULLUP` mode, 3-sample majority voting, and 2-cycle error debounce to prevent floating pin noise on disconnected probes.
+- Water tank UI state synchronization: Updated `PlantPilotViewModel` data state flow collector so live telemetry volume updates take precedence over DataStore default fallbacks, preventing tank level indicator flickering.
+- Telemetry discrete level mapping: Aligned discrete hardware water level fractions directly to exact 25%, 50%, 75%, and 100% bounds.
+
 ## [3.0] - 2026-08-06
 
 ### Fixed

@@ -166,6 +166,7 @@ class SyncCoordinator(
     fun applyDeviceConfig(dev: DeviceMotorConfig): Boolean {
         val plant = plants.value.find { it.motorNumber == dev.id } ?: return false
         if (dev.last_modified * 1000L <= plant.lastUpdated) return false
+        val devLastWateredMs = dev.last_watered?.takeIf { it > 0 }?.let { s -> s * 1000L } ?: 0L
         plants.update { currentList ->
             currentList.map {
                 if (it.id == plant.id) {
@@ -174,7 +175,7 @@ class SyncCoordinator(
                         waterAmountMl = dev.amount_ml,
                         moistureThreshold = dev.threshold ?: it.moistureThreshold,
                         minIntervalHours = dev.min_interval_hours ?: it.minIntervalHours,
-                        lastWateredTimestamp = dev.last_watered?.let { s -> s * 1000 } ?: it.lastWateredTimestamp,
+                        lastWateredTimestamp = maxOf(it.lastWateredTimestamp, devLastWateredMs),
                         // Soft-merge schedules: match by HH:MM to preserve IDs and selected days.
                         schedules = dev.schedules.map { devSched ->
                             val existing = it.schedules.find { s -> s.hour == devSched.hour && s.minute == devSched.minute }

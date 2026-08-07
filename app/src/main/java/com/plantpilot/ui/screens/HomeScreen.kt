@@ -101,6 +101,7 @@ fun HomeScreen(
                                 .padding(all = 16.dp),
                             tankCapacityMl = deviceState.tankCapacityMl,
                             estimatedWaterMl = deviceState.estimatedWaterMl,
+                            isDemoMode = settings.demoMode,
                         )
                     }
                 }

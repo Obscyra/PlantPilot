@@ -39,10 +39,10 @@ class TelemetryProcessor(
     private val SNAPSHOT_SAVE_INTERVAL_MS = 2000L
 
     fun applyTelemetry(status: DeviceStatusResponse) {
-        val capacity = deviceStateFlow.value.tankCapacityMl
+        val capacity = deviceStateFlow.value.tankCapacityMl.coerceAtLeast(100)
         val currentEstimatedMl = deviceStateFlow.value.estimatedWaterMl
-        val isDemo = settings.value.demoMode
-        val hardwareDiscrete = if (settings.value.useHardwareWaterSensor) {
+        val isDemo = settings.value.demoMode || status.demo_mode == true
+        val hardwareDiscrete = if (settings.value.useHardwareWaterSensor || isDemo) {
             status.water_level_raw ?: (if (status.water_level >= 0) status.water_level / 25 else null)
         } else {
             null // Completely ignore unattached hardware NPN sensor pin noise!
@@ -118,58 +118,48 @@ class TelemetryProcessor(
         capacityMl: Int,
         isDemoMode: Boolean
     ): Pair<Int, Int> {
-        if (hardwareLevelDiscrete == null) {
+        if (hardwareLevelDiscrete == null || hardwareLevelDiscrete < 0) {
             val level = mlToLevel(currentEstimatedMl, capacityMl)
             return Pair(level, currentEstimatedMl)
         }
 
-        if (isDemoMode) {
-            // Demo Mode Direct Hardware Sensor Override:
-            // Bypasses volume history calculations and displays hardware sensor level directly!
-            val demoLevel = hardwareLevelDiscrete.coerceIn(0, 4)
-            val demoMl = (capacityMl * (demoLevel * 0.25f)).toInt()
-            return Pair(demoLevel, demoMl)
-        }
-
-        // Normal Production Mode (Hybrid Model):
         val rawDiscrete = hardwareLevelDiscrete.coerceIn(0, 4)
-        
-        // Debounce transient zero reads (transient pin noise / probe float jitter)
-        val discrete = if (rawDiscrete == 0 && currentEstimatedMl > 0) {
-            zeroReadBufferCount++
-            if (zeroReadBufferCount < 3) {
-                mlToLevel(currentEstimatedMl, capacityMl)
-            } else {
-                0
-            }
-        } else {
-            zeroReadBufferCount = 0
-            rawDiscrete
+
+        if (isDemoMode) {
+            // DEMO MODE: Pure 3s direct hardware sensor read.
+            // Bypasses all history volume subtraction math.
+            val demoMl = (capacityMl * (rawDiscrete * 0.25f)).toInt()
+            return Pair(rawDiscrete, demoMl)
         }
 
-        if (discrete == 0) {
+        // NORMAL MODE: Hybrid model with Hardware Sensor Top Priority.
+        // Hardware sensor level changes immediately anchor tank volume bounds.
+        // History volume subtraction operates smoothly within the hardware sensor's bounds.
+        if (rawDiscrete == 0) {
             return Pair(0, 0)
         }
 
-        val (minFraction, maxFraction) = when (discrete) {
-            4 -> Pair(0.75f, 1.00f) // Level 4 (Full): 75% to 100%
-            3 -> Pair(0.50f, 0.75f) // Level 3: 50% to 75%
-            2 -> Pair(0.25f, 0.50f) // Level 2: 25% to 50%
-            1 -> Pair(0.05f, 0.25f) // Level 1: 5% to 25%
-            else -> Pair(0.00f, 0.00f)
+        val (minFraction, maxFraction, midFraction) = when (rawDiscrete) {
+            4 -> Triple(0.75f, 1.00f, 1.000f) // Level 4 (Full): 100%
+            3 -> Triple(0.50f, 0.75f, 0.750f) // Level 3: 75%
+            2 -> Triple(0.25f, 0.50f, 0.500f) // Level 2: 50%
+            1 -> Triple(0.05f, 0.25f, 0.250f) // Level 1: 25%
+            else -> Triple(0.00f, 0.00f, 0.000f)
         }
 
         val minAllowedMl = (capacityMl * minFraction).toInt()
         val maxAllowedMl = (capacityMl * maxFraction).toInt()
+        val midpointMl = (capacityMl * midFraction).toInt()
 
-        // If tracked volume is outside boundary, re-anchor it to the hardware sensor level boundary
+        // If tracked history volume is outside hardware sensor boundaries (e.g. sensor level change or refill),
+        // HARDWARE SENSOR WINS with top priority and snaps volume to the midpoint of the hardware level range.
         val reconciledMl = if (currentEstimatedMl < minAllowedMl || currentEstimatedMl > maxAllowedMl) {
-            maxAllowedMl
+            midpointMl
         } else {
-            currentEstimatedMl
+            currentEstimatedMl // Smooth history subtraction within sensor level band
         }
 
-        return Pair(discrete, reconciledMl)
+        return Pair(rawDiscrete, reconciledMl)
     }
 
     private fun mlToLevel(ml: Int, capacity: Int): Int {

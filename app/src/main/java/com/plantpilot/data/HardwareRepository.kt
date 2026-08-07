@@ -498,21 +498,20 @@ class HardwareRepository : HardwareConnection {
                 val element = json.parseToJsonElement(text)
                 val type = element.jsonObject["type"]?.jsonPrimitive?.content
                 
-                if (type == "telemetry") {
-                    val response = json.decodeFromJsonElement<DeviceStatusResponse>(element)
-                    // Detect an ESP32 reboot: a freshly-rebooted device reports a
-                    // small uptime after we previously saw a much larger one. This
-                    // distinguishes a real device reset from a mere socket drop.
-                    val prevUptime = _telemetry.value?.uptime_sec ?: 0L
-                    _telemetry.value = response
-                    val uptime = response.uptime_sec ?: 0L
-                    if (prevUptime > 0 && uptime < prevUptime - 60L) {
-                        addLog("System: ESP32 rebooted (uptime reset ${prevUptime}s -> ${uptime}s)")
+                if (type == "telemetry" || type == "status") {
+                    try {
+                        val response = json.decodeFromJsonElement<DeviceStatusResponse>(element)
+                        val prevUptime = _telemetry.value?.uptime_sec ?: 0L
+                        _telemetry.value = response
+                        val uptime = response.uptime_sec ?: 0L
+                        if (prevUptime > 0 && uptime < prevUptime - 60L) {
+                            addLog("System: ESP32 rebooted (uptime reset ${prevUptime}s -> ${uptime}s)")
+                        }
+                    } catch (e: Exception) {
+                        // ignore parse errors for non-telemetry status payloads
                     }
-                    // Don't sync pump states from telemetry — it overwrites local
-                    // toggles before the ESP32 confirms. States are synced via
-                    // OK responses and STATUS replies instead.
-                } else if (type == "ok" || type == "status") {
+                }
+                if (type == "ok" || type == "status") {
                     // Command acknowledgment or status response with actual pump states from firmware.
                     // Only update the local state if we haven't sent a command
                     // recently, otherwise the optimistic toggle wins until the

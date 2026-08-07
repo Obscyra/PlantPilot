@@ -330,8 +330,8 @@ fun HardwareSettingsScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = if (settings.useHardwareWaterSensor) "Enabled — Tank level driven by 4-stage NPN hardware sensor."
-                                       else "Disabled — Software history mode. Manually calibrate or refill tank below.",
+                                text = if (settings.useHardwareWaterSensor) "Enabled — Tank level driven by 4-stage hardware probe sensor."
+                                       else "Disabled — Software history volume tracking mode.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -342,47 +342,6 @@ fun HardwareSettingsScreen(
                                 viewModel.setUseHardwareWaterSensor(enabled)
                             }
                         )
-                    }
-
-                    AnimatedVisibility(visible = !settings.useHardwareWaterSensor) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-
-                            Text(
-                                text = "Manual Tank Volume Calibration",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                var manualWaterText by remember(deviceState.estimatedWaterMl) {
-                                    mutableStateOf(deviceState.estimatedWaterMl.toString())
-                                }
-                                OutlinedTextField(
-                                    value = manualWaterText,
-                                    onValueChange = { newValue ->
-                                        manualWaterText = newValue
-                                        newValue.toIntOrNull()?.let { ml ->
-                                            viewModel.setEstimatedWaterMl(ml)
-                                        }
-                                    },
-                                    label = { Text("Current Water (ml)") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Button(
-                                    onClick = { viewModel.refillTankToFull() },
-                                    shape = MaterialTheme.shapes.medium
-                                ) {
-                                    Text("Refill 100%")
-                                }
-                            }
-                        }
                     }
                 }
             }
